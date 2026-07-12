@@ -116,6 +116,18 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
+# SDev multi-repo task detection (phase 5): a task with slug= is an SDev
+# workspace and uses a PER-REPO landed-work gate plus a `sdev end` archive
+# instead of the single treehouse worktree return. Inert (IS_SDEV=0) for a
+# treehouse task, so the single-repo path below is unchanged.
+IS_SDEV=0
+SDEV_SLUG=$(grep '^slug=' "$META" | cut -d= -f2- || true)
+SDEV_WS=$WT
+SDEV_HOME_DIR=$(grep '^sdev_home=' "$META" | cut -d= -f2- || true)
+SDEV_PROJ=$(basename "$PROJ")
+SDEV_BRANCH="task/$SDEV_SLUG"
+[ -n "$SDEV_SLUG" ] && IS_SDEV=1
+
 default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -303,6 +315,76 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# --- SDev multi-repo teardown safety (phase 5) ------------------------------
+# The per-repo counterpart of the single-repo gate above. Each changed repo in
+# the workspace must be landed and clean, or teardown refuses and names it. The
+# phase-4 landed_<key>= markers inform this; content-in-default (remote) and
+# merged-into-local-base (local-only) are the fallbacks.
+sdev_repo_base() {  # <repo-wt> <default_base> -> base ref (origin/<b> when remote-backed)
+  local wt=$1 default_base=$2
+  if git -C "$wt" remote get-url origin >/dev/null 2>&1; then
+    git -C "$wt" fetch origin "+refs/heads/$default_base:refs/remotes/origin/$default_base" --quiet 2>/dev/null || true
+    printf 'origin/%s' "$default_base"
+  else
+    printf '%s' "$default_base"
+  fi
+}
+
+sdev_repo_dirty() {  # <repo-wt>: 0 iff dirty, ignoring firstmate hook files
+  local wt=$1
+  [ -n "$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1)" ]
+}
+
+sdev_repo_content_in_default() {  # <repo-wt> <base-ref>: 0 iff task branch content is in base
+  local wt=$1 base=$2 dtree mtree
+  dtree=$(git -C "$wt" rev-parse --quiet --verify "$base^{tree}" 2>/dev/null) || return 1
+  mtree=$(git -C "$wt" merge-tree --write-tree "$base" "$SDEV_BRANCH" 2>/dev/null | head -1) || return 1
+  [ -n "$mtree" ] && [ "$mtree" = "$dtree" ]
+}
+
+sdev_repo_landed() {  # <key> <repo-wt> <base-ref> <mode>: 0 iff landed / nothing to land
+  local key=$1 wt=$2 base=$3 mode=$4
+  git -C "$wt" rev-parse --verify --quiet "refs/heads/$SDEV_BRANCH" >/dev/null 2>&1 || return 0
+  git -C "$wt" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1 || return 1
+  if git -C "$wt" diff --quiet "$base...$SDEV_BRANCH" -- 2>/dev/null; then return 0; fi
+  if grep -q "^landed_$key=" "$META"; then return 0; fi
+  if [ "$mode" = local-only ]; then
+    git -C "$wt" merge-base --is-ancestor "$SDEV_BRANCH" "$base" 2>/dev/null
+  else
+    sdev_repo_content_in_default "$wt" "$base"
+  fi
+}
+
+sdev_teardown_refuse() {  # <dirty-keys> <unlanded-keys>
+  [ -z "$1" ] && [ -z "$2" ] && return 0
+  echo "REFUSED: SDev task $ID has repos not safe to tear down (workspace $SDEV_WS)." >&2
+  [ -z "$1" ] || echo "  dirty repos:$1 (commit or discard, then --force)" >&2
+  [ -z "$2" ] || echo "  unlanded repos:$2 (land via fm-ship-multi.sh, or --force to discard)" >&2
+  return 1
+}
+
+validate_sdev_teardown_safety() {  # refuses if any changed repo is dirty or unlanded
+  local repos key path base wt base_ref mode dirty="" unlanded=""
+  repos=$(SDEV_HOME="$SDEV_HOME_DIR" "$SCRIPT_DIR/fm-sdev-registry.sh" repos "$SDEV_PROJ") \
+    || { echo "REFUSED: cannot resolve SDev repos for $SDEV_PROJ (SDEV_HOME=$SDEV_HOME_DIR)" >&2; return 1; }
+  while IFS=$'\t' read -r key path base _; do
+    { [ -n "$path" ] && wt="$SDEV_WS/$path" && [ -d "$wt" ]; } || continue
+    sdev_repo_dirty "$wt" && dirty="$dirty $key"
+    base_ref=$(sdev_repo_base "$wt" "$base")
+    mode=$("$SCRIPT_DIR/fm-landing-policy.sh" "$SDEV_PROJ" "$key" | cut -d' ' -f1)
+    sdev_repo_landed "$key" "$wt" "$base_ref" "$mode" || unlanded="$unlanded $key"
+  done <<EOF
+$repos
+EOF
+  sdev_teardown_refuse "$dirty" "$unlanded"
+}
+
+sdev_teardown_archive() {  # archive the workspace after a safe teardown, or warn
+  command -v sdev >/dev/null 2>&1 || { echo "warning: sdev not found; workspace $SDEV_WS not archived" >&2; return 0; }
+  SDEV_HOME="$SDEV_HOME_DIR" sdev -p "$SDEV_PROJ" end "$SDEV_SLUG" \
+    || echo "warning: sdev end $SDEV_SLUG failed; workspace $SDEV_WS left in place (archive it manually)" >&2
 }
 
 backlog_refresh_reminder() {
@@ -971,7 +1053,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$IS_SDEV" = 1 ] && [ "$FORCE" != "--force" ]; then
+  validate_sdev_teardown_safety || exit 1
+fi
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$IS_SDEV" != 1 ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -1002,7 +1087,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$IS_SDEV" != 1 ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -1023,6 +1108,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+fi
+
+# SDev tasks archive the whole workspace with `sdev end` instead of returning a
+# single treehouse worktree; safety was already gated per repo above.
+if [ "$IS_SDEV" = 1 ] && [ "$KIND" != secondmate ]; then
+  sdev_teardown_archive
 fi
 
 if [ "$BACKEND" != orca ]; then

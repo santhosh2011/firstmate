@@ -1,7 +1,7 @@
 # SDev workspace backend
 
-Status: phase 4 (data layer, workspace and run layer, combined review, all-or-nothing ship).
-This doc grows as a later phase adds multi-repo teardown.
+Status: phase 5 (data layer, workspace and run layer, combined review, all-or-nothing ship, multi-repo teardown and recovery).
+A later phase folds the design and this doc's cross-references into the shared AGENTS.md.
 
 SDev lets firstmate manage a multi-repo feature as one task.
 A project marked SDev-backed points at a `SDEV_HOME` (this captain: `/Users/santhosh/code/shamrock`); its tasks become multi-repo SDev workspaces instead of single treehouse worktrees.
@@ -45,6 +45,15 @@ Phase-2 limitation: the caller still passes an existing `projects/<name>` direct
 `fm-run.sh <id> url` prints the task's live URL, resolved from `sdev ls --json` for the task `<project>/<slug>`, or exits non-zero when there is no live URL yet.
 `fm-run.sh <id> open` opens the URL in a browser with `sdev open <slug>`.
 This URL read is distinct from the watcher's pane-endpoint liveness check: it reports whether the stack serves a URL, not whether the crewmate pane is alive.
+
+## Teardown and recovery - `bin/fm-teardown.sh`, `bin/fm-session-start.sh`
+
+For an SDev task (meta carries `slug=`) teardown applies the landed-work gate PER REPO: every changed repo's `task/<slug>` branch must be landed - a phase-4 `landed_<key>=` marker, its content already in the repo's default, or (local-only) merged into its local base - and clean, or teardown refuses and names the offending repos.
+Any dirty repo refuses.
+On success it archives the workspace with `sdev end <slug>` instead of returning a treehouse worktree.
+`--force` is the explicit discard path, exactly as for a single-repo task.
+The single-repo teardown gate (a treehouse `project=` task) is unchanged.
+On restart, the session-start fleet digest surfaces an SDev task's `slug`, `repos`, workspace, and `sdev_home`, so recovery reconstructs the multi-repo shape from meta rather than assuming a single `project=`/`worktree=`.
 
 ## Combined review - `bin/fm-review-diff.sh`
 
