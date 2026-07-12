@@ -161,6 +161,38 @@ test_env_beats_config_file() {
   pass "fm-sdev-registry prefers SDEV_HOME env over config/sdev-home"
 }
 
+test_home_prints_resolved_dir() {
+  local home cfg out
+  home=$(make_sdev_home homecmd scdi multi-repo.yml)
+  cfg=$(make_config homecmd)
+  out=$(run_registry "$home" "$cfg" home)
+  expect_code 0 $? "home: resolvable SDEV_HOME prints cleanly"
+  assert_eq "$out" "$home" "home: prints the resolved SDEV_HOME directory"
+  pass "fm-sdev-registry home prints the resolved SDEV_HOME"
+}
+
+test_home_from_config_file_no_env() {
+  local home cfg out
+  home=$(make_sdev_home homecfg scdi multi-repo.yml)
+  cfg=$(make_config homecfg)
+  printf '%s\n' "$home" > "$cfg/sdev-home"
+  out=$(env -u SDEV_HOME FM_CONFIG_OVERRIDE="$cfg" FM_ROOT_OVERRIDE="$ROOT" "$REGISTRY" home)
+  expect_code 0 $? "home: resolves from config/sdev-home when env unset"
+  assert_eq "$out" "$home" "home: config-resolved SDEV_HOME printed"
+  pass "fm-sdev-registry home resolves SDEV_HOME from config/sdev-home"
+}
+
+test_home_not_backed_when_unresolvable() {
+  local cfg out err
+  cfg=$(make_config homenone)
+  err="$TMP_ROOT/homenone.err"
+  out=$(env -u SDEV_HOME FM_CONFIG_OVERRIDE="$cfg" FM_ROOT_OVERRIDE="$ROOT" "$REGISTRY" home 2>"$err")
+  expect_code "$NOT_BACKED" $? "home: unresolvable SDEV_HOME is not-backed"
+  assert_eq "$out" "" "home: no stdout when unresolvable"
+  [ ! -s "$err" ] || fail "home: stays silent when SDEV_HOME cannot be resolved"
+  pass "fm-sdev-registry home is inert when SDEV_HOME cannot be resolved"
+}
+
 test_usage_error_without_subcommand() {
   local cfg err
   cfg=$(make_config usage)
@@ -180,4 +212,7 @@ test_not_backed_sdev_home_unset
 test_not_backed_nonexistent_home
 test_home_from_config_file
 test_env_beats_config_file
+test_home_prints_resolved_dir
+test_home_from_config_file_no_env
+test_home_not_backed_when_unresolvable
 test_usage_error_without_subcommand

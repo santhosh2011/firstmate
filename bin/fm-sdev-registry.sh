@@ -32,7 +32,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 NOT_BACKED=3
 
 usage() {
-  echo "usage: fm-sdev-registry.sh <backed|repos> <project>" >&2
+  echo "usage: fm-sdev-registry.sh <backed|repos> <project> | fm-sdev-registry.sh home" >&2
   exit 2
 }
 
@@ -64,8 +64,20 @@ emit_repos() {
 }
 
 sub=${1:-}
+[ -n "$sub" ] || usage
+
+# The home subcommand answers "where is SDEV_HOME?" for callers that need the
+# resolved path (fm-spawn's workspace provider, fm-run). It takes no project and
+# stays silent + not-backed when SDEV_HOME cannot be resolved to a real dir.
+if [ "$sub" = home ]; then
+  home=$(resolve_sdev_home)
+  [ -n "$home" ] && [ -d "$home" ] || exit "$NOT_BACKED"
+  printf '%s\n' "$home"
+  exit 0
+fi
+
 project=${2:-}
-[ -n "$sub" ] && [ -n "$project" ] || usage
+[ -n "$project" ] || usage
 
 case "$sub" in
   backed)
