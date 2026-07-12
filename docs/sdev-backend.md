@@ -1,7 +1,7 @@
 # SDev workspace backend
 
-Status: phase 2 (data layer plus workspace and run layer).
-This doc grows as later phases add combined review, all-or-nothing ship, and multi-repo teardown.
+Status: phase 3 (data layer, workspace and run layer, combined review).
+This doc grows as later phases add all-or-nothing ship and multi-repo teardown.
 
 SDev lets firstmate manage a multi-repo feature as one task.
 A project marked SDev-backed points at a `SDEV_HOME` (this captain: `/Users/santhosh/code/shamrock`); its tasks become multi-repo SDev workspaces instead of single treehouse worktrees.
@@ -45,6 +45,13 @@ Phase-2 limitation: the caller still passes an existing `projects/<name>` direct
 `fm-run.sh <id> url` prints the task's live URL, resolved from `sdev ls --json` for the task `<project>/<slug>`, or exits non-zero when there is no live URL yet.
 `fm-run.sh <id> open` opens the URL in a browser with `sdev open <slug>`.
 This URL read is distinct from the watcher's pane-endpoint liveness check: it reports whether the stack serves a URL, not whether the crewmate pane is alive.
+
+## Combined review - `bin/fm-review-diff.sh`
+
+For an SDev task (meta carries `slug=`), `fm-review-diff.sh <id>` resolves the workspace's per-repo worktrees from the registry and emits one combined diff across the changed repos.
+Each repo is compared against its OWN authoritative base - its `default_base` from the registry, which may differ per repo (one repo on `origin/develop`, another on `origin/main`) - fetched from origin when the repo is remote-backed, else the local base branch.
+Each changed repo is printed under a `===== repo: <key> (base <base>) =====` header; untouched repos are excluded.
+A treehouse task (meta carries `project=` and no `slug=`) takes the unchanged single-repo path.
 
 ## Multi-repo ship brief - `bin/fm-brief.sh --sdev`
 

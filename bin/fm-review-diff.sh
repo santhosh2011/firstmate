@@ -40,6 +40,60 @@ esac
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
+# --- Combined multi-repo SDev review (phase 3) ------------------------------
+# An SDev task (slug= in meta) compares each repo's task/<slug> branch against
+# that repo's OWN default_base (from the registry; bases may differ per repo)
+# and emits one combined diff labeled per repo, excluding untouched repos. A
+# treehouse task (no slug=) falls through to the single-repo path below,
+# byte-identical.
+sdev_repo_base() {  # <repo-wt> <default_base> -> base ref (origin/<b> when remote-backed)
+  local wt=$1 default_base=$2
+  if git -C "$wt" remote get-url origin >/dev/null 2>&1; then
+    git -C "$wt" fetch origin "+refs/heads/$default_base:refs/remotes/origin/$default_base" --quiet 2>/dev/null || true
+    printf 'origin/%s' "$default_base"
+  else
+    printf '%s' "$default_base"
+  fi
+}
+review_sdev_one_repo() {  # <repo-wt> <label> <default_base>: emit labeled diff, 0 if changed
+  local wt=$1 label=$2 default_base=$3 branch="task/$SLUG" base
+  [ -d "$wt" ] || return 1
+  git -C "$wt" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  base=$(sdev_repo_base "$wt" "$default_base")
+  git -C "$wt" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1 \
+    || { echo "warning: repo $label base $base unresolved; skipping" >&2; return 1; }
+  if git -C "$wt" diff --quiet "$base...$branch" --; then return 1; fi
+  printf '\n===== repo: %s (base %s) =====\n' "$label" "$base"
+  git -C "$wt" diff --stat "$base...$branch" --
+  "$STAT_ONLY" || { echo; git -C "$wt" diff "$base...$branch" --; }
+}
+review_sdev_repos() {  # <workspace> <repos-tsv>: iterate, emitting only changed repos
+  local ws=$1 repos=$2 emitted=0 key path base
+  while IFS=$'\t' read -r key path base _; do
+    [ -n "$path" ] || continue
+    if review_sdev_one_repo "$ws/$path" "$key" "$base"; then emitted=$((emitted + 1)); fi
+  done <<SDEV_REPOS
+$repos
+SDEV_REPOS
+  [ "$emitted" -gt 0 ] || echo "no changes across the $SLUG workspace repos"
+}
+review_sdev_task() {
+  local ws proj_name sdev_home repos
+  ws=$(grep '^worktree=' "$META" | cut -d= -f2-)
+  proj_name=$(basename "$(grep '^project=' "$META" | cut -d= -f2-)")
+  sdev_home=$(grep '^sdev_home=' "$META" | cut -d= -f2-)
+  [ -d "$ws" ] || { echo "error: workspace for task $ID is missing: $ws" >&2; return 1; }
+  repos=$(SDEV_HOME="$sdev_home" "$SCRIPT_DIR/fm-sdev-registry.sh" repos "$proj_name") \
+    || { echo "error: cannot resolve SDev repos for $proj_name under $sdev_home" >&2; return 1; }
+  echo "combined review: $proj_name workspace $ws (slug $SLUG)"
+  review_sdev_repos "$ws" "$repos"
+}
+SLUG=$(grep '^slug=' "$META" | cut -d= -f2- || true)
+if [ -n "$SLUG" ]; then
+  review_sdev_task
+  exit $?
+fi
+
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
