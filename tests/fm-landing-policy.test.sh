@@ -146,6 +146,30 @@ test_empty_projects_object_fails_safe() {
   pass "fm-landing-policy defaults to no-mistakes off when the overlay has no projects"
 }
 
+test_order_reads_explicit_array() {
+  local cfg out
+  cfg=$(make_config orderarr '{"projects":{"scdi":{"order":["common","api","ui"],"default":{"mode":"direct-PR"}}}}')
+  out=$(run_landing "$cfg" order scdi)
+  assert_eq "$out" "$(printf 'common\napi\nui')" "order: reads the explicit dependency order array"
+  pass "fm-landing-policy order prints the project's explicit landing order"
+}
+
+test_order_empty_when_unset() {
+  local cfg out
+  cfg=$(make_config noorder "$POLICY")
+  out=$(run_landing "$cfg" order scdi)
+  assert_eq "$out" "" "order: empty when the project declares no order"
+  pass "fm-landing-policy order is empty when no order is declared"
+}
+
+test_order_empty_when_no_overlay() {
+  local cfg out
+  cfg=$(make_config noorderfile)
+  out=$(run_landing "$cfg" order scdi)
+  assert_eq "$out" "" "order: empty when there is no overlay at all"
+  pass "fm-landing-policy order is empty when the overlay is absent"
+}
+
 test_usage_error_without_repo() {
   local cfg err
   cfg=$(make_config usage "$POLICY")
@@ -167,4 +191,7 @@ test_unknown_project_fails_safe
 test_unknown_mode_fails_safe
 test_malformed_json_fails_safe
 test_empty_projects_object_fails_safe
+test_order_reads_explicit_array
+test_order_empty_when_unset
+test_order_empty_when_no_overlay
 test_usage_error_without_repo

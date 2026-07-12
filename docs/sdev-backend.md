@@ -1,7 +1,7 @@
 # SDev workspace backend
 
-Status: phase 3 (data layer, workspace and run layer, combined review).
-This doc grows as later phases add all-or-nothing ship and multi-repo teardown.
+Status: phase 4 (data layer, workspace and run layer, combined review, all-or-nothing ship).
+This doc grows as a later phase adds multi-repo teardown.
 
 SDev lets firstmate manage a multi-repo feature as one task.
 A project marked SDev-backed points at a `SDEV_HOME` (this captain: `/Users/santhosh/code/shamrock`); its tasks become multi-repo SDev workspaces instead of single treehouse worktrees.
@@ -52,6 +52,17 @@ For an SDev task (meta carries `slug=`), `fm-review-diff.sh <id>` resolves the w
 Each repo is compared against its OWN authoritative base - its `default_base` from the registry, which may differ per repo (one repo on `origin/develop`, another on `origin/main`) - fetched from origin when the repo is remote-backed, else the local base branch.
 Each changed repo is printed under a `===== repo: <key> (base <base>) =====` header; untouched repos are excluded.
 A treehouse task (meta carries `project=` and no `slug=`) takes the unchanged single-repo path.
+
+## All-or-nothing ship - `bin/fm-ship-multi.sh`
+
+`fm-ship-multi.sh <id>` reports the ship plan and readiness across the task's changed repos; `--merge` lands them.
+A repo is CHANGED when its `task/<slug>` branch differs from its own base; each changed repo's landing mode comes from `bin/fm-landing-policy.sh`.
+Every changed repo must be a ready landing candidate before ANY repo lands: a remote repo (no-mistakes / direct-PR) needs a recorded `pr_<key>=<url>` whose PR is OPEN, APPROVED, and green; a local-only repo needs its `task/<slug>` branch to fast-forward onto its base.
+Partial-failure policy: NEVER partial-merge - if any changed repo is not ready, nothing lands and the blocking repo is reported.
+Ready repos land in dependency order: the overlay's `order` array for the project (via `fm-landing-policy.sh order <project>`), or common-first-then-registry-order when unset.
+A remote repo lands by squash-merging its PR with `gh-axi`; a local-only repo lands by a local fast-forward of its base branch in the source worktree.
+Each landed repo records a `landed_<key>=<url|local>` marker in meta for teardown.
+The single-repo ship path (`fm-pr-check.sh` / `fm-pr-merge.sh` for a treehouse task) is untouched.
 
 ## Multi-repo ship brief - `bin/fm-brief.sh --sdev`
 

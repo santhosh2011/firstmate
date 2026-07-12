@@ -1,6 +1,7 @@
 {
   "projects": {
     "scdi": {
+      "order": ["common", "api", "ui"],
       "default": { "mode": "direct-PR", "yolo": false },
       "repos": {
         "common": { "mode": "direct-PR" }

@@ -24,6 +24,11 @@
 #
 # Output: two words to stdout, "<mode> <yolo>" where mode is one of
 # no-mistakes|direct-PR|local-only and yolo is on|off.
+#
+# The `order <project>` subcommand prints the project's explicit dependency
+# landing order (one repo key per line) from a `.projects.<project>.order` array
+# in the overlay, or nothing when unset. fm-ship-multi consumes it to land repos
+# in dependency order (default common-first when this is empty).
 # Exit codes: 0 ok; 2 usage error; 127 jq missing while an overlay exists.
 set -eu
 
@@ -64,6 +69,18 @@ resolve() {
        else false end) as $yolo
     | "\($mode) \(if $yolo then "on" else "off" end)"' "$POLICY"
 }
+
+# order <project>: print the declared landing order, one repo key per line, or
+# nothing (no overlay, no jq, or no order array). Never fails - an absent order
+# just means fm-ship-multi uses its default.
+if [ "${1:-}" = order ]; then
+  order_project=${2:-}
+  [ -n "$order_project" ] || usage
+  [ -f "$POLICY" ] || exit 0
+  command -v jq >/dev/null 2>&1 || exit 0
+  jq -r --arg p "$order_project" '.projects[$p].order // [] | .[]' "$POLICY" 2>/dev/null || true
+  exit 0
+fi
 
 project=${1:-}
 repo=${2:-}
