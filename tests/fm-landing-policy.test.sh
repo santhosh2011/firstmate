@@ -31,7 +31,10 @@ POLICY='{
         "ui": { "yolo": true }
       }
     },
-    "spnr": { "default": { "mode": "local-only", "yolo": true } }
+    "spnr": {
+      "default": { "mode": "local-only", "yolo": true },
+      "repos": { "ui": { "yolo": false } }
+    }
   }
 }'
 
@@ -80,6 +83,14 @@ test_project_default_yolo_on() {
   out=$(run_landing "$cfg" spnr api)
   assert_eq "$out" "local-only on" "spnr: project default carries mode and yolo together"
   pass "fm-landing-policy carries a yolo-on project default"
+}
+
+test_per_repo_yolo_false_overrides_default_true() {
+  local cfg out
+  cfg=$(make_config yolofalse "$POLICY")
+  out=$(run_landing "$cfg" spnr ui)
+  assert_eq "$out" "local-only off" "yolo false override: an explicit per-repo yolo:false must beat a project default yolo:true"
+  pass "fm-landing-policy lets a per-repo yolo:false override a project-default yolo:true"
 }
 
 test_unknown_repo_uses_project_default() {
@@ -149,6 +160,7 @@ test_project_default
 test_per_repo_override
 test_partial_override_merges_over_default
 test_project_default_yolo_on
+test_per_repo_yolo_false_overrides_default_true
 test_unknown_repo_uses_project_default
 test_no_overlay_file_fails_safe
 test_unknown_project_fails_safe

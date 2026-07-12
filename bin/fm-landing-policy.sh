@@ -46,12 +46,22 @@ fallback() {
 }
 
 # jq resolves the per-repo override merged over the project default, each axis
-# falling back independently to the built-in "no-mistakes"/false.
+# falling back independently to the built-in "no-mistakes"/false. It selects on
+# has() rather than `//` so an explicitly set `false` (e.g. a per-repo yolo:false
+# over a default yolo:true) overrides instead of being treated as absent, which
+# would fail open on the approval axis. type=="object" guards a null project,
+# default block, or repo entry from erroring under has().
 resolve() {
   jq -r --arg p "$1" --arg r "$2" '
     .projects[$p] as $proj
-    | ($proj.repos[$r].mode // $proj.default.mode // "no-mistakes") as $mode
-    | ($proj.repos[$r].yolo // $proj.default.yolo // false) as $yolo
+    | $proj.repos[$r] as $ro
+    | $proj.default as $pd
+    | (if ($ro|type=="object") and ($ro|has("mode")) then $ro.mode
+       elif ($pd|type=="object") and ($pd|has("mode")) then $pd.mode
+       else "no-mistakes" end) as $mode
+    | (if ($ro|type=="object") and ($ro|has("yolo")) then $ro.yolo
+       elif ($pd|type=="object") and ($pd|has("yolo")) then $pd.yolo
+       else false end) as $yolo
     | "\($mode) \(if $yolo then "on" else "off" end)"' "$POLICY"
 }
 
