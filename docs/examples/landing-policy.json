@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "scdi": {
+      "default": { "mode": "direct-PR", "yolo": false },
+      "repos": {
+        "common": { "mode": "direct-PR" }
+      }
+    },
+    "spnr": {
+      "default": { "mode": "local-only", "yolo": false }
+    }
+  }
+}

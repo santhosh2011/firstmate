@@ -1,0 +1,12 @@
+# Fixture: a monorepo SDev project (modeled on pdmt = one consolidated repo).
+# Exercises the N=1 case where the repo key, path, and compose_role all differ.
+conf_prefix: mono-api
+default_shell_service: app
+template: core/mono/docker-compose.tmpl
+stack_services: [nginx, api, db, redis]
+repos:
+  chips:
+    path: edm-apps-mono-chips-ui
+    default_base: develop
+    compose_role: app
+    link_node_modules: false
