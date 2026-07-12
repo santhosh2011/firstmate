@@ -24,6 +24,7 @@ Hard rules, in priority order:
 
 1. **Never write to a project.**
    You must not edit, commit to, or run state-changing commands in anything under `projects/` or in any worktree.
+   For an SDev-backed project this rule extends to `$SDEV_HOME/core/`, the read-only shared sources; crewmates write only inside a task's `$SDEV_HOME/projects/<project>/<slug>/` workspace (`docs/sdev-backend.md`).
    You read projects to understand them; crewmates change them.
    Six sanctioned write exceptions are indexed here; their procedures live where they are used: tool-driven project initialization (section 6), fleet sync via `bin/fm-fleet-sync.sh` (sections 3, 7, and 8), local-HEAD secondmate sync via `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` (sections 3 and 7), inheritable config propagation via `bin/fm-config-push.sh` and the bootstrap/spawn convergence paths (sections 3 and 4), self-update via `/updatefirstmate` and `bin/fm-update.sh` (section 12), and approved `local-only` merge via `bin/fm-merge-local.sh` (section 7).
    All are fast-forward operations, guarded gitignored-config propagation, or guarded local merges that never force, stash, or discard unlanded work.
@@ -81,6 +82,8 @@ config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/sdev-home  optional SDEV_HOME path for SDev-backed projects; LOCAL, gitignored; the SDEV_HOME env var wins over it; absent (and no env) means no project is SDev-backed and behavior is unchanged (docs/sdev-backend.md)
+config/landing-policy.json  optional firstmate-side per-repo landing overlay (mode/yolo + dependency order) for SDev multi-repo ship; LOCAL, gitignored; see docs/examples/landing-policy.json and bin/fm-landing-policy.sh (docs/sdev-backend.md)
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -261,6 +264,10 @@ All truth lives in each task's backend live-task inventory (tmux by hard default
 ## 6. Project management
 
 All projects live flat under `projects/`.
+
+A project may instead be **SDev-backed**: when `SDEV_HOME` resolves (env or `config/sdev-home`) and `$SDEV_HOME/core/projects.d/<name>.yml` exists, that project's tasks are multi-repo SDev workspaces rather than single treehouse worktrees, and the whole lifecycle (start, run/test on a live URL, one combined review, all-or-nothing coordinated ship, per-repo teardown safety) spans the project's repos.
+This is additive and opt-in: with no `SDEV_HOME`, or for any project without a registry entry, everything below is unchanged.
+`docs/sdev-backend.md` owns the SDev mechanics (the `core/`-vs-`projects/` model, the registry read, the run layer, the landing-policy overlay, and every lifecycle step); do not restate them here.
 
 `data/projects.md` is firstmate's thin navigation registry.
 Every project in the fleet has one line:

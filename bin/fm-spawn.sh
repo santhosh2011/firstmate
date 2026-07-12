@@ -660,6 +660,36 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# --- SDev workspace gate (phase 2) ------------------------------------------
+# A SDev-backed project (fm-sdev-registry reports it under a resolvable
+# SDEV_HOME) routes a ship/scout task through a multi-repo SDev workspace
+# instead of a single treehouse worktree. Inert otherwise: IS_SDEV stays 0 and
+# the treehouse/orca/cmux paths run byte-for-byte as before. Orca is excluded
+# (it owns its own worktree) and secondmate spawns never reach here. The
+# SDEV_HOME/registry resolution lives in fm-sdev-registry.sh (the one owner).
+IS_SDEV=0
+SDEV_PROJ=
+SDEV_SLUG=
+SDEV_HOME_DIR=
+SDEV_REPO_KEYS=
+SDEV_REPO_PATHS=
+WT_REAL=
+sdev_registry() { "$SCRIPT_DIR/fm-sdev-registry.sh" "$@"; }
+resolve_sdev_gate() {
+  local repos
+  SDEV_PROJ=$(basename "$PROJ_ABS")
+  sdev_registry backed "$SDEV_PROJ" >/dev/null 2>&1 || return 0
+  SDEV_HOME_DIR=$(sdev_registry home) || return 0
+  repos=$(sdev_registry repos "$SDEV_PROJ") || return 0
+  IS_SDEV=1
+  SDEV_SLUG=$ID
+  SDEV_REPO_KEYS=$(printf '%s\n' "$repos" | cut -f1 | paste -sd' ' -)
+  SDEV_REPO_PATHS=$(printf '%s\n' "$repos" | cut -f2)
+}
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  resolve_sdev_gate
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -828,7 +858,50 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+# --- SDev workspace provider (phase 2) --------------------------------------
+# The SDev counterpart to `treehouse get`: create the multi-repo workspace with
+# `sdev new`, place the crewmate in it, and assert per-repo isolation so no repo
+# worktree resolves onto its core/ source. Runs only when IS_SDEV=1.
+sdev_repo_is_isolated() {  # <repo-dir>: a worktree root nested inside the workspace
+  local d=$1 d_real top top_real
+  d_real=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$d_real" = "$top_real" ] || return 1
+  case "$d_real" in "$WT_REAL"/*) return 0 ;; *) return 1 ;; esac
+}
+validate_spawn_sdev_workspace() {  # per-repo isolation; aborts on failure
+  local rp
+  WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || { echo "error: SDev workspace missing: $WT" >&2; exit 1; }
+  while IFS= read -r rp; do
+    [ -n "$rp" ] || continue
+    sdev_repo_is_isolated "$WT/$rp" || { echo "error: SDev repo '$rp' at $WT/$rp is not an isolated git worktree root; refusing to launch to avoid tangling a core/ source" >&2; exit 1; }
+  done <<SDEV_REPOS
+$SDEV_REPO_PATHS
+SDEV_REPOS
+}
+sdev_wait_pane_in_workspace() {  # ensure the cd landed before launch, like treehouse
+  local _ p
+  for _ in $(seq 1 60); do
+    p=$(spawn_current_path "$WT_TARGET" || true)
+    [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$(real_path_or_raw "$WT")" ] && return 0
+    sleep 1
+  done
+  echo "error: crewmate pane did not enter the SDev workspace within 60s; inspect window $T" >&2
+  exit 1
+}
+spawn_sdev_workspace() {  # create the workspace and place the crewmate in it
+  sdev -p "$SDEV_PROJ" new "$SDEV_SLUG" >/dev/null 2>&1 || { echo "error: sdev new $SDEV_SLUG failed for project $SDEV_PROJ; inspect window $T" >&2; exit 1; }
+  WT=$(sdev -p "$SDEV_PROJ" cd "$SDEV_SLUG" 2>/dev/null) || WT=
+  [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: sdev workspace dir not resolved for $SDEV_SLUG" >&2; exit 1; }
+  validate_spawn_sdev_workspace
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
+  sdev_wait_pane_in_workspace
+}
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$IS_SDEV" = 1 ]; then
+  spawn_sdev_workspace
+fi
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$IS_SDEV" != 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -870,7 +943,16 @@ mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
-  local rel=$1 EXCL
+  local rel=$1 EXCL wt_r top top_r
+  # Only a genuine worktree ROOT owns an info/exclude to write into. An SDev
+  # multi-repo workspace is not itself a git worktree (its per-repo worktrees
+  # are nested inside it), so writing there would land in the enclosing SDEV_HOME
+  # repo's git metadata; skip that. Physical-path compare is symlink-safe, so a
+  # treehouse worktree root still matches and behaves exactly as before.
+  wt_r=$(cd "$WT" 2>/dev/null && pwd -P) || return 0
+  top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) || return 0
+  top_r=$(cd "$top" 2>/dev/null && pwd -P) || return 0
+  [ "$wt_r" = "$top_r" ] || return 0
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
   mkdir -p "$(dirname "$EXCL")"
@@ -1017,6 +1099,15 @@ META_WINDOW=$T
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  # SDev task extras (phase 2): the multi-repo workspace identity. Additive -
+  # project=/worktree= above stay, so anything that reads a treehouse task's meta
+  # is unaffected; later phases resolve repo detail from the registry via
+  # sdev_home + slug (the source of truth), not by duplicating it into meta.
+  if [ "$IS_SDEV" = 1 ]; then
+    echo "sdev_home=$SDEV_HOME_DIR"
+    echo "slug=$SDEV_SLUG"
+    echo "repos=$SDEV_REPO_KEYS"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

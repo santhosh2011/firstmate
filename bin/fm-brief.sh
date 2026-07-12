@@ -6,10 +6,14 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--sdev]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --sdev writes a multi-repo SDev ship brief: one git worktree per repo in the
+#   task workspace, each on branch task/<slug>, with a combined definition of done
+#   across the repos. The project must be SDev-backed; ship-only. The single-repo
+#   ship brief is unchanged when the flag is absent.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -73,6 +77,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+SDEV=0
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -80,6 +85,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --sdev) SDEV=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -87,6 +93,11 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$SDEV" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --sdev applies only to crewmate ship briefs" >&2
   exit 1
 fi
 
@@ -262,6 +273,66 @@ When the report is complete, append \`done: {one-line conclusion}\` to the statu
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
+exit 0
+fi
+
+if [ "$SDEV" -eq 1 ]; then
+# Multi-repo SDev ship brief: one worktree per repo in the workspace, each on
+# branch task/<slug>. The repo set comes from the SDev registry (phase 1's
+# fm-sdev-registry.sh), so the project must be SDev-backed.
+SDEV_REPOS=$("$FM_ROOT/bin/fm-sdev-registry.sh" repos "$REPO") \
+  || { echo "error: $REPO is not SDev-backed (set SDEV_HOME or config/sdev-home); cannot scaffold a multi-repo brief" >&2; exit 1; }
+REPO_LIST=$(printf '%s\n' "$SDEV_REPOS" \
+  | awk -F'\t' -v slug="$ID" '$1!="" {printf "- %s (worktree: %s/, branch task/%s)\n", $1, $2, slug}')
+cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+# Task
+{TASK}
+
+$HERDR_SECTION
+
+# Setup
+You are in a multi-repo SDev workspace for this task: one directory holding one git worktree per repo, each already on its branch \`task/$ID\`.
+The repos in this workspace:
+$REPO_LIST
+
+**Verify isolation before anything else.** For each repo worktree above, run \`git -C <repo-dir> rev-parse --show-toplevel\`; each must resolve to that repo's own worktree inside this workspace, never its shared source in the SDev home.
+If any repo resolves outside this workspace, STOP - do not commit - append \`blocked: workspace repo not isolated\` to the status file and stop.
+
+1. Work across only the repos the task needs. Each repo is already on branch \`task/$ID\`; commit each changed repo's work on that branch and leave untouched repos clean.
+
+# Rules
+1. Never push to any repo's default branch and never merge a PR. Firstmate coordinates shipping across the repos.
+2. Stay inside this workspace; modify nothing outside it, and never touch the SDev home's shared repo sources.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+4. Report status by appending one line:
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
+   FYI progress lines; firstmate reads your pane for that.
+   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   known external wait you expect to clear on its own. Use \`blocked:\` when you are stuck and need help.
+5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
+   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so it is durably closed.
+7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
+   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+# Project memory
+For each repo you touch, if its \`AGENTS.md\` or \`CLAUDE.md\` already exists, or the task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in that repo's worktree and record only knowledge useful to almost every future session.
+Prefer a pointer to the authoritative file, command, or doc over copying detail; skip \`AGENTS.md\` edits for trivial changes.
+
+# Definition of done
+This is a multi-repo SDev task: the deliverable spans every repo you changed.
+Implement the feature across the repos, commit each changed repo on its \`task/$ID\` branch, and leave untouched repos clean.
+When every changed repo is committed, append \`done: ready for review across repos\` to the status file and stop.
+Firstmate then brings the stack up for the captain to exercise, reviews the combined diff, and coordinates the all-or-nothing ship across the repos - you do not push or open PRs yourself.
+EOF
+echo "scaffolded: $BRIEF (ship, sdev multi-repo; replace {TASK})"
 exit 0
 fi
 

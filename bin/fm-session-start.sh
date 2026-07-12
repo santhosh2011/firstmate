@@ -258,6 +258,14 @@ for meta in "$STATE"/*.meta; do
     printf 'endpoint: unknown (no window recorded)\n'
   fi
 
+  # SDev multi-repo task: surface the workspace and repo set so recovery
+  # reconstructs it from slug=/repos=/sdev_home= rather than a single project=.
+  sdev_slug=$(fm_meta_get "$meta" slug)
+  if [ -n "$sdev_slug" ]; then
+    printf 'sdev: multi-repo task (slug=%s repos=%s workspace=%s sdev_home=%s)\n' \
+      "$sdev_slug" "$(fm_meta_get "$meta" repos)" "$(fm_meta_get "$meta" worktree)" "$(fm_meta_get "$meta" sdev_home)"
+  fi
+
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
     print_status_tail "$status"

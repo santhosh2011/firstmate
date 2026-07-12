@@ -463,6 +463,27 @@ EOF
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }
 
+test_sdev_task_recovery_digest() {
+  local rec root home fakebin out
+  rec=$(new_world sdev-recovery)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:sdev-window"
+
+  printf 'window=fm-sess:sdev-window\nkind=ship\nproject=%s/projects/scdi\nworktree=%s/ws\nsdev_home=%s/sdev\nslug=task-sdev\nrepos=api ui common\n' \
+    "$home" "$home" "$home" > "$home/state/task-sdev.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "sdev: multi-repo task (slug=task-sdev repos=api ui common" \
+    "SDev recovery annotation missing from digest"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:sdev-window)" \
+    "SDev task endpoint liveness not reported on recovery"
+  pass "the digest reconstructs a multi-repo SDev task from slug=/repos=/sdev_home= without erroring on the single-project= assumption"
+}
+
 test_endpoint_liveness_herdr() {
   local rec root home fakebin out
   rec=$(new_world liveness-herdr)
@@ -706,6 +727,7 @@ test_output_ordering_diagnostics_lead
 test_status_tail_bounding
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
+test_sdev_task_recovery_digest
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
 test_fleet_digest_empty_fleet
