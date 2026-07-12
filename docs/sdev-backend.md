@@ -1,13 +1,29 @@
 # SDev workspace backend
 
-Status: phase 5 (data layer, workspace and run layer, combined review, all-or-nothing ship, multi-repo teardown and recovery).
-A later phase folds the design and this doc's cross-references into the shared AGENTS.md.
-
 SDev lets firstmate manage a multi-repo feature as one task.
 A project marked SDev-backed points at a `SDEV_HOME` (this captain: `/Users/santhosh/code/shamrock`); its tasks become multi-repo SDev workspaces instead of single treehouse worktrees.
-Treehouse stays the default, so a project that is not SDev-backed behaves exactly as before.
+Treehouse stays the default, so a project that is not SDev-backed behaves exactly as before, and a firstmate with no `SDEV_HOME` sees no change at all.
 SDev owns the workspace (the multi-repo worktrees, the generated docker stack, ports, run/test); firstmate owns dispatch, supervision, review, shipping, and teardown safety.
 Firstmate calls the `sdev` CLI; it does not reimplement it.
+
+## Sources and workspaces (`core/` vs `projects/`)
+
+`$SDEV_HOME/core/` holds each repo's shared source checkout and the registry at `core/projects.d/*.yml`; it is the source of truth for repo composition and is READ-ONLY to firstmate and crewmates, exactly like `projects/<name>` clones are today.
+`$SDEV_HOME/projects/<project>/<slug>/` is a per-task workspace holding one git worktree per repo; that workspace is the only place a crewmate writes.
+The AGENTS.md never-write-to-a-project rule therefore extends from `projects/<name>` to `$SDEV_HOME/core/`.
+Per-repo worktree isolation is asserted at spawn so no workspace repo resolves back onto its `core/` source.
+
+## Task lifecycle
+
+A multi-repo task runs the same firstmate lifecycle as a single-repo task, with each step spanning the workspace's repos:
+
+1. Start - `bin/fm-spawn.sh` creates the workspace with `sdev new <slug>` and launches one crewmate across all its repos (Workspace provider, below).
+2. Run and test - `bin/fm-run.sh <id> up|url|open` brings the stack up and surfaces a live URL so the captain exercises the feature before review (Run layer, below).
+3. Combined review - `bin/fm-review-diff.sh <id>` shows one diff across every changed repo (Combined review, below).
+4. All-or-nothing ship - `bin/fm-ship-multi.sh <id> --merge` lands every changed repo atomically in dependency order, or nothing (All-or-nothing ship, below).
+5. Teardown - `bin/fm-teardown.sh <id>` refuses until every repo has landed, then archives the workspace with `sdev end` (Teardown and recovery, below).
+
+A monorepo is the N=1 case of this same lifecycle.
 
 ## Configuration
 
@@ -35,9 +51,9 @@ The workspace is `$SDEV_HOME/projects/<project>/<slug>/`, holding one git worktr
 Before launch, fm-spawn asserts per-repo isolation: each repo directory must be its own git worktree root nested inside the workspace, so no repo resolves onto its shared source.
 Orca is excluded (it owns its own worktree) and secondmate spawns never take this path.
 The meta records `sdev_home=`, `slug=`, and `repos=` (the repo keys) in addition to the usual fields; `project=` and `worktree=` stay, so anything that reads a treehouse task's meta is unaffected.
-Later phases resolve per-repo detail from the registry via `sdev_home` plus `slug`, rather than duplicating it into meta.
+Downstream steps resolve per-repo detail from the registry via `sdev_home` plus `slug`, rather than duplicating it into meta.
 
-Phase-2 limitation: the caller still passes an existing `projects/<name>` directory (the pane starts there and cd's into the workspace); retiring the duplicate flat clones is a later phase.
+Current limitation: the caller still passes an existing `projects/<name>` directory (the pane starts there and cd's into the workspace); retiring the duplicate flat clones is future work.
 
 ## Run layer - `bin/fm-run.sh`
 
@@ -48,7 +64,7 @@ This URL read is distinct from the watcher's pane-endpoint liveness check: it re
 
 ## Teardown and recovery - `bin/fm-teardown.sh`, `bin/fm-session-start.sh`
 
-For an SDev task (meta carries `slug=`) teardown applies the landed-work gate PER REPO: every changed repo's `task/<slug>` branch must be landed - a phase-4 `landed_<key>=` marker, its content already in the repo's default, or (local-only) merged into its local base - and clean, or teardown refuses and names the offending repos.
+For an SDev task (meta carries `slug=`) teardown applies the landed-work gate PER REPO: every changed repo's `task/<slug>` branch must be landed - a `landed_<key>=` marker recorded at ship, its content already in the repo's default, or (local-only) merged into its local base - and clean, or teardown refuses and names the offending repos.
 Any dirty repo refuses.
 On success it archives the workspace with `sdev end <slug>` instead of returning a treehouse worktree.
 `--force` is the explicit discard path, exactly as for a single-repo task.
