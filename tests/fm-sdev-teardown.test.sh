@@ -77,7 +77,7 @@ YML
 { "projects": { "scdi": { "default": {"mode":"no-mistakes"}, "repos": { "common": {"mode":"local-only"} } } } }
 JSON
   fm_write_meta "$home/state/$SLUG.meta" \
-    "window=fm-$SLUG" "worktree=$ws" "project=$home/projects/scdi" \
+    "window=firstmate:fm-$SLUG" "worktree=$ws" "project=$home/projects/scdi" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "sdev_home=$sdev" "slug=$SLUG" "repos=api common"
   [ "$api_landed" = 1 ] && echo "landed_api=https://github.com/o/api/pull/1" >> "$home/state/$SLUG.meta"
