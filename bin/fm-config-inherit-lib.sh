@@ -326,7 +326,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc src_state
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -335,7 +335,20 @@ propagate_shared_captain_preferences() {
   dest_home=${dest_data%/data}
   rc=0
 
-  if [ -e "$src" ] || [ -L "$src" ]; then
+  # Absence here quarantines and removes the destination copy, so it has to be
+  # provable. An unsearchable primary data/ is a lookup that never happened, not
+  # a primary without a value, and reading it as one would displace every live
+  # secondmate's shared file while reporting success.
+  src_state=0
+  fm_path_state "$src" || src_state=$?
+  if [ "$src_state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+    reason="undeterminable primary source ($FM_PATH_STATE_REASON)"
+    warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
+    record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+    return 1
+  fi
+
+  if [ "$src_state" -eq "$FM_PATH_STATE_EXISTS" ]; then
     if ! shared_captain_file_safe_existing "$src"; then
       reason="unsafe primary source"
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"

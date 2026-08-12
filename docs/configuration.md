@@ -293,6 +293,7 @@ That refusal then removes the worktree and closes the window this dispatch itsel
 A no-go refusal is the one abort that removes rather than recycles, because the worktree is somewhere it must not be and the pool it would return to may itself sit inside the declared prefix.
 So it calls `treehouse destroy`, which deletes the worktree, and `sdev destroy --force`, which deletes the per-repo worktrees, the port offset, and the ledger entry rather than archiving them.
 Every other abort in that window keeps the ordinary recycling verb, `treehouse return --force`, which hands the worktree back to the pool for the next spawn, and that stays the behavior for teardown too.
+SDev has no such recycling verb, since `sdev end` frees the task's port offset either way, with or without `--pool`, so any other abort leaves an SDev workspace, its port offset, and its ledger entry exactly where they are.
 Removal is deliberately conservative and only ever unwinds what this dispatch itself created: the SDev branch acts only on the workspace this invocation's own `sdev new` produced, and every checkout must be provably clean, meaning `git status` both succeeded and reported nothing.
 Any probe that cannot establish that - an unreadable repository, a `git status` that fails, a path this dispatch did not create - makes the refusal warn and name the directory and the reason instead of deleting anything uncertain.
 Declaring the worktree pool root itself in `config/no-go-paths` is what makes that case refuse before a window is ever opened.

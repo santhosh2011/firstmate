@@ -432,20 +432,29 @@ spawn_abort_remove_task_worktree() {
       fi
       ;;
     sdev)
+      # Same split as the treehouse branch above, and for the same reason. SDev
+      # has no recycling verb to fall back on: `sdev end --help` states the
+      # task's port offset is freed either way, with or without --pool, so there
+      # is no unwind that leaves the offset and ledger entry standing. Doing
+      # nothing is what preserves them, and it is what an ordinary abort did
+      # before this teardown existed.
+      if [ "$SPAWN_WORKTREE_ABORT_NO_GO" != 1 ]; then
+        return 0
+      fi
       if ! spawn_abort_sdev_workspace_is_removable "$dir"; then
         echo "warning: leaving SDev workspace $dir in place: $SPAWN_ABORT_UNSAFE_REASON" >&2
         return 0
       fi
       if ! command -v sdev >/dev/null 2>&1; then
-        echo "warning: sdev is unavailable, so workspace $dir created by this aborted spawn is still in place; remove it manually" >&2
+        echo "warning: sdev is unavailable, so workspace $dir created by this refused spawn is still in place; remove it manually" >&2
         return 0
       fi
-      # `sdev end` archives; only `sdev destroy` actually removes the worktrees,
-      # offset, and ledger entry, which is what a refusal inside a declared no-go
-      # path needs. Safe here and only here: this workspace is provably the one
-      # this invocation created moments ago and every repo in it is clean.
+      # Only `sdev destroy` removes the worktrees, offset, and ledger entry, which
+      # is what a refusal inside a declared no-go path needs. Safe here and only
+      # here: this workspace is provably the one this invocation created moments
+      # ago and every repo in it is clean.
       out=$(SDEV_HOME="${SDEV_HOME_DIR:-}" sdev -p "${SDEV_PROJ:-}" destroy "${SDEV_SLUG:-}" --force 2>&1) \
-        || echo "warning: could not remove SDev workspace $dir created by this aborted spawn; remove it manually${out:+: $(first_line "$out")}" >&2
+        || echo "warning: could not remove SDev workspace $dir created by this refused spawn; remove it manually${out:+: $(first_line "$out")}" >&2
       ;;
   esac
 }
