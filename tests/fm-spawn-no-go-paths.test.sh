@@ -158,7 +158,12 @@ test_batch_refuses_only_the_offending_pair() {
   local d out status
   d=$(new_case batch)
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" "nogo-batch-a-q7=$d/nogo/proj" "nogo-batch-b-q8=$d/allowed")
+  # --harness pins the adapter for both pairs: an unpinned spawn resolves the
+  # harness (and aborts on one with no launch template) before it reaches the
+  # no-go check, so ambient detection - claude under an agent, unknown on a CI
+  # runner - would decide this case instead of the guard.
+  out=$(run_spawn "$d" --harness codex \
+    "nogo-batch-a-q7=$d/nogo/proj" "nogo-batch-b-q8=$d/allowed")
   status=$?
   [ "$status" -ne 0 ] || fail "a batch containing a refused pair must exit non-zero"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -191,7 +196,7 @@ test_secondmate_home_is_checked_before_mutation() {
   id=nogo-sm-q7
   seed_secondmate_home "$d/nogo/home" "$id"
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" "$id" "$d/nogo/home" --secondmate)
+  out=$(run_spawn "$d" "$id" "$d/nogo/home" --harness codex --secondmate)
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate launch into a no-go path must fail"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -217,7 +222,7 @@ test_allowed_secondmate_home_proceeds() {
   id=nogo-smok-q7
   seed_secondmate_home "$d/allowed/home" "$id"
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" "$id" "$d/allowed/home" --secondmate)
+  out=$(run_spawn "$d" "$id" "$d/allowed/home" --harness codex --secondmate)
   status=$?
   [ "$status" -ne 0 ] || fail "the fixture omits the charter, so this run must still fail"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \

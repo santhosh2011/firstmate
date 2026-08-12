@@ -91,13 +91,13 @@ test_herdr_pin_gives_up_after_the_bounded_attempts() {
   out=$(printf '%s\n' "$result" | tail -n +2)
 
   [ "$rc" -ne 0 ] || fail "Herdr pin reported success with every download failing"
-  [ "$(cat "$tmp/curl-count")" -eq 3 ] \
+  [ "$(cat "$tmp/curl-count")" -eq 5 ] \
     || fail "Herdr pin did not stop at its bounded attempt count"$'\n'"$out"
-  assert_contains "$out" "after 3 attempts" \
+  assert_contains "$out" "after 5 attempts" \
     "Herdr pin did not name the exhausted attempt count"
-  # Growing pause, not an instant re-fire: that is what makes a CDN reset
-  # survivable rather than five failures inside the same instant.
-  [ "$(printf '%s\n' "$(cat "$tmp/sleep-log")")" = "$(printf '1\n2')" ] \
+  # A doubling pause spanning ~30s, not an instant re-fire: the release CDN
+  # answered 503 across the whole window a linear 1s/2s backoff could cover.
+  [ "$(printf '%s\n' "$(cat "$tmp/sleep-log")")" = "$(printf '2\n4\n8\n16')" ] \
     || fail "Herdr pin did not back off between attempts"$'\n'"$(cat "$tmp/sleep-log")"
   [ ! -e "$destination/herdr" ] \
     || fail "Herdr pin left a binary behind after giving up"
@@ -135,11 +135,11 @@ test_treehouse_pin_gives_up_after_the_bounded_attempts() {
   out=$(printf '%s\n' "$result" | tail -n +2)
 
   [ "$rc" -ne 0 ] || fail "Treehouse pin reported success with every download failing"
-  [ "$(cat "$tmp/curl-count")" -eq 3 ] \
+  [ "$(cat "$tmp/curl-count")" -eq 5 ] \
     || fail "Treehouse pin did not stop at its bounded attempt count"$'\n'"$out"
-  assert_contains "$out" "after 3 attempts" \
+  assert_contains "$out" "after 5 attempts" \
     "Treehouse pin did not name the exhausted attempt count"
-  [ "$(printf '%s\n' "$(cat "$tmp/sleep-log")")" = "$(printf '1\n2')" ] \
+  [ "$(printf '%s\n' "$(cat "$tmp/sleep-log")")" = "$(printf '2\n4\n8\n16')" ] \
     || fail "Treehouse pin did not back off between attempts"$'\n'"$(cat "$tmp/sleep-log")"
   [ ! -e "$destination/treehouse" ] \
     || fail "Treehouse pin left a binary behind after giving up"

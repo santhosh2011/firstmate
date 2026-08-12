@@ -25,7 +25,10 @@ FM_HERDR_CI_REPO=ogulcancelik/herdr
 # A single reset mid-transfer from the release CDN used to fail the whole
 # required lane, because curl's own same-connection retries all fire inside the
 # same instant. Bounded attempts with a growing pause, like the ShellCheck pin.
-FM_HERDR_CI_DOWNLOAD_ATTEMPTS=3
+# The pause doubles, and the attempt budget spans ~30s, because the release CDN
+# answered 503 for the whole 4s window a linear 1s/2s backoff could cover.
+FM_HERDR_CI_DOWNLOAD_ATTEMPTS=5
+FM_HERDR_CI_DOWNLOAD_FIRST_WAIT=2
 
 die() {
   printf 'fm-install-herdr.sh: %s\n' "$*" >&2
@@ -65,11 +68,14 @@ trap 'rm -rf "$TMP"' EXIT
 printf 'fm-install-herdr.sh: downloading %s from %s\n' "$ASSET" "$URL" >&2
 # --fail: HTTP errors; --location: follow redirects; --max-filesize: bound.
 download_attempt=1
+download_wait=$FM_HERDR_CI_DOWNLOAD_FIRST_WAIT
 while ! curl -fsSL --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET"; do
   [ "$download_attempt" -lt "$FM_HERDR_CI_DOWNLOAD_ATTEMPTS" ] \
     || die "download failed for $URL after $FM_HERDR_CI_DOWNLOAD_ATTEMPTS attempts (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
-  printf 'fm-install-herdr.sh: download attempt %s failed; retrying\n' "$download_attempt" >&2
-  sleep "$download_attempt"
+  printf 'fm-install-herdr.sh: download attempt %s failed; retrying in %ss\n' \
+    "$download_attempt" "$download_wait" >&2
+  sleep "$download_wait"
+  download_wait=$((download_wait * 2))
   download_attempt=$((download_attempt + 1))
 done
 
