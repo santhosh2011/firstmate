@@ -123,6 +123,34 @@ copy_inheritable_file() {
   return 1
 }
 
+# Classify one inheritable source item: 0 when it is a readable regular file, 1
+# when it does not exist in any form, 2 with a reason on stdout when it exists
+# but cannot be read as one - a directory, a dangling symlink, a symlink to a
+# directory, or an unreadable file.
+#
+# The distinction is load-bearing. "Not a readable regular file" is NOT "the
+# primary has no value": mirroring it as absence would delete the destination's
+# inherited copy on the strength of a broken source, which for
+# config/no-go-paths means deleting the very boundary the operator declared.
+inheritable_source_state() {  # <src>
+  local src=$1
+  if [ ! -e "$src" ] && [ ! -L "$src" ]; then
+    return 1
+  fi
+  if [ -L "$src" ] && [ ! -e "$src" ]; then
+    printf '%s' "unusable primary source (dangling symlink)"
+  elif [ -d "$src" ]; then
+    printf '%s' "unusable primary source (directory)"
+  elif [ ! -f "$src" ]; then
+    printf '%s' "unusable primary source (not a regular file)"
+  elif [ ! -r "$src" ]; then
+    printf '%s' "unusable primary source (not readable)"
+  else
+    return 0
+  fi
+  return 2
+}
+
 destination_allows_inherited_item() {
   local dest_config=$1 item=$2 dest_parent dest_name dest_parent_abs top dest_path rel_path
   dest_parent=${dest_config%/*}
@@ -147,9 +175,11 @@ destination_allows_inherited_item() {
 # so this writes nothing there. It emits concise stderr diagnostics only for
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
-# churns mtimes). A source item that is absent is mirrored as a missing
+# churns mtimes). A source item that is genuinely ABSENT is mirrored as a missing
 # destination item, so clearing the primary's value clears it downstream too
-# (primary-authoritative). The destination dir is created lazily, only when there
+# (primary-authoritative). A source item that exists but is not a readable
+# regular file is an error, never absence: the destination copy is left exactly
+# as it was rather than removed on the strength of a broken source. The destination dir is created lazily, only when there
 # is actually something to write, so a primary with no inherited config item set is a
 # complete no-op (it leaves the secondmate home exactly as it was - the
 # backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
@@ -416,7 +446,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest reason rc src_state src_reason
   FM_CONFIG_INHERIT_BOUNDARY_FAILED=0
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
@@ -468,7 +498,18 @@ propagate_inheritable_config() {
         fi
       fi
     fi
-    if [ -f "$src" ]; then
+    src_state=0
+    src_reason=$(inheritable_source_state "$src") || src_state=$?
+    if [ "$src_state" = 2 ]; then
+      warn_inheritable_config_error "$item" "$src" "$src_reason"
+      record_inheritable_config_result "$item" error "$src_reason"
+      if [ "$item" = "$FM_NO_GO_FILE" ]; then
+        FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+      fi
+      rc=1
+      continue
+    fi
+    if [ "$src_state" = 0 ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
@@ -501,7 +542,8 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
-      # Primary has no value for this item: mirror the absence downstream.
+      # Primary genuinely has no value for this item: mirror the absence
+      # downstream. Only state 1 above reaches here, never an unusable source.
       if rm -f "$dest" 2>/dev/null; then
         record_inheritable_config_result "$item" pushed "mirrored primary absence"
       else

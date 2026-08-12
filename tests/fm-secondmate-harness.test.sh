@@ -391,6 +391,85 @@ test_propagate_lib() {
   pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
 }
 
+# A primary item that EXISTS but is not a readable regular file is a propagation
+# error, never "the primary has no value". Mirroring it as absence would delete
+# the destination's inherited copy on the strength of a broken source, and for
+# config/no-go-paths that means deleting the operator's declared boundary out of
+# a live secondmate home during an ordinary bootstrap sweep. The destination copy
+# must survive untouched and the caller must see a failure.
+test_propagate_unusable_source_is_an_error_not_absence() {
+  local d src dest label report status stderr n=0
+  d="$TMP_ROOT/prop-unusable"
+  src="$d/src"
+  dest="$d/home/config"
+
+  for label in directory dangling-symlink symlink-to-directory unreadable-file; do
+    n=$((n + 1))
+    rm -rf "${src:?}" "${d:?}/home" "${d:?}/elsewhere"
+    mkdir -p "$src" "$dest" "$d/elsewhere"
+    printf '/downstream/limit\n' > "$dest/no-go-paths"
+    printf 'codex\n' > "$src/crew-harness"
+    printf 'codex\n' > "$dest/crew-harness"
+    case "$label" in
+      directory) mkdir -p "$src/no-go-paths" ;;
+      dangling-symlink) ln -s "$d/gone/no-go-paths" "$src/no-go-paths" ;;
+      symlink-to-directory) ln -s "$d/elsewhere" "$src/no-go-paths" ;;
+      unreadable-file)
+        [ "$(id -u)" != 0 ] || continue
+        printf '/primary/limit\n' > "$src/no-go-paths"
+        chmod 000 "$src/no-go-paths"
+        ;;
+    esac
+
+    report="$d/report-$n.tsv"
+    stderr="$d/unusable-$n.err"
+    : > "$report"
+    status=0
+    FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$dest" \
+      2>"$stderr" || status=$?
+
+    [ "$status" -ne 0 ] \
+      || fail "$label: an unusable primary source was not surfaced as a propagation failure"
+    fm_config_inherit_boundary_failed \
+      || fail "$label: an unusable primary boundary file did not set the boundary flag"
+    [ "$(cat "$dest/no-go-paths" 2>/dev/null)" = /downstream/limit ] \
+      || fail "$label: the downstream boundary file was modified or deleted"
+    assert_contains "$(cat "$stderr")" "fm-config-inherit: error: unusable primary source" \
+      "$label: no stderr diagnostic named the unusable source"
+    assert_contains "$(cat "$report")" $'no-go-paths\terror\t' \
+      "$label: the item was not recorded as an error"
+    grep -F 'mirrored primary absence' "$report" >/dev/null \
+      && fail "$label: an unusable source was reported as a successful absence mirror"
+    # Scoped: an unrelated item alongside it still propagates normally.
+    [ "$(cat "$dest/crew-harness")" = codex ] \
+      || fail "$label: an unusable boundary source disturbed an unrelated item"
+  done
+  pass "B1b propagate_inheritable_config: an unusable primary source errors and never mirrors as absence"
+}
+
+# The boundary flag stays scoped to config/no-go-paths: the same unusable-source
+# error on any other item is a plain non-fatal propagation failure, so a
+# secondmate launch is not aborted by an advisory item.
+test_unusable_source_boundary_flag_is_scoped_to_no_go_paths() {
+  local d src dest status
+  d="$TMP_ROOT/prop-unusable-scope"
+  src="$d/src"
+  dest="$d/home/config"
+  mkdir -p "$src" "$dest"
+  ln -s "$d/gone/crew-harness" "$src/crew-harness"
+  printf 'claude\n' > "$dest/crew-harness"
+
+  status=0
+  propagate_inheritable_config "$src" "$dest" 2>/dev/null || status=$?
+
+  [ "$status" -ne 0 ] || fail "scope: an unusable non-boundary source must still fail"
+  fm_config_inherit_boundary_failed \
+    && fail "scope: an unusable non-boundary source set the boundary flag"
+  [ "$(cat "$dest/crew-harness")" = claude ] \
+    || fail "scope: the destination copy was removed on the strength of a broken source"
+  pass "B1c propagate_inheritable_config: the fatal boundary flag stays scoped to no-go-paths"
+}
+
 # ===========================================================================
 # B/A integration: a secondmate spawn resolves the secondmate harness and
 # propagates the crew harness into the home's config.
@@ -2421,6 +2500,8 @@ test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
+test_propagate_unusable_source_is_an_error_not_absence
+test_unusable_source_boundary_flag_is_scoped_to_no_go_paths
 test_spawn_split_and_inherit
 test_spawn_refuses_when_the_boundary_file_cannot_be_inherited
 test_spawn_launches_when_the_boundary_file_inherits
