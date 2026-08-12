@@ -13,7 +13,9 @@
 # sends its pointer to that live secondmate via fm-config-inherit-lib.sh
 # (fm_config_send_reread_nudge).
 # Unchanged config and data/captain-shared.md-only updates send no reread
-# message unless a previous send failure is pending for that home.
+# message unless a previous send failure is pending for that home. So does a
+# push that changed only a reread-excluded inherited item such as
+# config/no-go-paths: fm-config-inherit-lib.sh owns that exclusion and why.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -26,9 +28,10 @@ live secondmate home.
 
 This is local-material-only:
   - does not fast-forward tracked files
-  - after successful config/* changes, writes a generation-specific
+  - after successful reread-allowlisted config/* changes, writes a generation-specific
     literal-content reread instruction and sends its pointer to that live secondmate
-    (no message when config is unchanged unless a previous send failure is pending)
+    (no message when config is unchanged, or when only a reread-excluded item such
+    as config/no-go-paths changed, unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
   - exits non-zero for real propagation errors or reread-send failures

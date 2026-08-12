@@ -96,6 +96,11 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every spawn also refuses when the project directory, the resolved task
+#   worktree, or a secondmate home lands inside a prefix declared in the local
+#   config/no-go-paths; docs/configuration.md "No-go paths" owns that contract,
+#   including what a refusal removes and why a batch pair's refusal does not stop
+#   its siblings.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
