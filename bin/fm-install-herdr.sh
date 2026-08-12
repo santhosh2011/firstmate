@@ -22,6 +22,10 @@ FM_HERDR_CI_MIN_PROTOCOL=16
 # Bounded download ceiling (bytes). The largest official 0.7.4 asset is under 20 MiB.
 FM_HERDR_CI_MAX_BYTES=25000000
 FM_HERDR_CI_REPO=ogulcancelik/herdr
+# A single reset mid-transfer from the release CDN used to fail the whole
+# required lane, because curl's own same-connection retries all fire inside the
+# same instant. Bounded attempts with a growing pause, like the ShellCheck pin.
+FM_HERDR_CI_DOWNLOAD_ATTEMPTS=3
 
 die() {
   printf 'fm-install-herdr.sh: %s\n' "$*" >&2
@@ -60,8 +64,14 @@ trap 'rm -rf "$TMP"' EXIT
 
 printf 'fm-install-herdr.sh: downloading %s from %s\n' "$ASSET" "$URL" >&2
 # --fail: HTTP errors; --location: follow redirects; --max-filesize: bound.
-curl -fsSL --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET" \
-  || die "download failed for $URL (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
+download_attempt=1
+while ! curl -fsSL --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET"; do
+  [ "$download_attempt" -lt "$FM_HERDR_CI_DOWNLOAD_ATTEMPTS" ] \
+    || die "download failed for $URL after $FM_HERDR_CI_DOWNLOAD_ATTEMPTS attempts (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
+  printf 'fm-install-herdr.sh: download attempt %s failed; retrying\n' "$download_attempt" >&2
+  sleep "$download_attempt"
+  download_attempt=$((download_attempt + 1))
+done
 
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA256=$(sha256sum "$TMP/$ASSET" | awk '{print $1}')

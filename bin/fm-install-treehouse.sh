@@ -17,6 +17,9 @@ FM_TREEHOUSE_CI_TAG="v${FM_TREEHOUSE_CI_VERSION}"
 # Bounded download ceiling (bytes). Official 2.0.1 archives are under 8 MiB.
 FM_TREEHOUSE_CI_MAX_BYTES=15000000
 FM_TREEHOUSE_CI_REPO=kunchenguid/treehouse
+# Same bounded retry as the Herdr pin: this download sits in the same required
+# lane, so one transient CDN reset must not decide the lane's result.
+FM_TREEHOUSE_CI_DOWNLOAD_ATTEMPTS=3
 
 die() {
   printf 'fm-install-treehouse.sh: %s\n' "$*" >&2
@@ -54,8 +57,14 @@ TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-treehouse.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 printf 'fm-install-treehouse.sh: downloading %s from %s\n' "$ARCHIVE" "$URL" >&2
-curl -fsSL --max-filesize "$FM_TREEHOUSE_CI_MAX_BYTES" "$URL" -o "$TMP/$ARCHIVE" \
-  || die "download failed for $URL (bounded at $FM_TREEHOUSE_CI_MAX_BYTES bytes)"
+download_attempt=1
+while ! curl -fsSL --max-filesize "$FM_TREEHOUSE_CI_MAX_BYTES" "$URL" -o "$TMP/$ARCHIVE"; do
+  [ "$download_attempt" -lt "$FM_TREEHOUSE_CI_DOWNLOAD_ATTEMPTS" ] \
+    || die "download failed for $URL after $FM_TREEHOUSE_CI_DOWNLOAD_ATTEMPTS attempts (bounded at $FM_TREEHOUSE_CI_MAX_BYTES bytes)"
+  printf 'fm-install-treehouse.sh: download attempt %s failed; retrying\n' "$download_attempt" >&2
+  sleep "$download_attempt"
+  download_attempt=$((download_attempt + 1))
+done
 
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
