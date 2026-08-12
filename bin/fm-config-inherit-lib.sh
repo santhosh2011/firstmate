@@ -326,7 +326,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc src_state
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc src_state dest_state
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -424,32 +424,44 @@ propagate_shared_captain_preferences() {
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       rc=1
     fi
-  elif [ -e "$dest" ] || [ -L "$dest" ]; then
-    if ! shared_captain_file_safe_existing "$dest"; then
-      reason="unsafe destination"
-      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-      return 1
-    fi
-    if ! shared_captain_dir_safe "$dest_parent"; then
-      reason="unsafe destination directory"
-      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest_parent" "$reason"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-      restore_shared_captain_readonly "$dest" || true
-      return 1
-    fi
-    if quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
-      printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "mirrored primary absence after quarantining local copy at $quarantine"
-    else
-      reason="failed to quarantine destination before mirroring primary absence"
-      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-      restore_shared_captain_readonly "$dest" || true
-      rc=1
-    fi
   else
-    record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" unchanged ""
+    # The primary is provably without a value, so what happens next turns on the
+    # destination alone: quarantine and remove it, or record that there was
+    # nothing to converge. Neither answer may rest on a lookup that failed.
+    dest_state=0
+    fm_path_state "$dest" || dest_state=$?
+    if [ "$dest_state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+      reason="undeterminable destination ($FM_PATH_STATE_REASON)"
+      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+      return 1
+    elif [ "$dest_state" -eq "$FM_PATH_STATE_EXISTS" ]; then
+      if ! shared_captain_file_safe_existing "$dest"; then
+        reason="unsafe destination"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        return 1
+      fi
+      if ! shared_captain_dir_safe "$dest_parent"; then
+        reason="unsafe destination directory"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest_parent" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        restore_shared_captain_readonly "$dest" || true
+        return 1
+      fi
+      if quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
+        printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "mirrored primary absence after quarantining local copy at $quarantine"
+      else
+        reason="failed to quarantine destination before mirroring primary absence"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        restore_shared_captain_readonly "$dest" || true
+        rc=1
+      fi
+    else
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" unchanged ""
+    fi
   fi
   return "$rc"
 }

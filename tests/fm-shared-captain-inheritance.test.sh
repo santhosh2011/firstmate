@@ -204,6 +204,52 @@ test_undeterminable_source_leaves_the_destination_intact() {
   pass "an undeterminable primary shared file leaves the destination intact and reports failure"
 }
 
+# The other half of the same question. With the primary provably without a value,
+# what happens next turns on the DESTINATION: quarantine and remove it, or record
+# that there was nothing to converge. An unsearchable secondmate data/ answers
+# neither, so reporting "unchanged" would call a home converged while it silently
+# keeps preferences the primary retracted.
+test_undeterminable_destination_is_reported_as_failure() {
+  local rec primary second status err report
+  if [ "$(id -u)" = 0 ]; then
+    pass "undeterminable secondmate data dir (skipped: root searches every directory)"
+    return 0
+  fi
+  rec=$(new_home_pair undeterminable-destination)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  # Primary data/ is searchable and its shared file is genuinely absent, so the
+  # source side is PROVABLY ABSENT and the destination alone decides.
+  assert_absent "$primary/data/captain-shared.md" "fixture wrote a primary shared file"
+  write_shared "$second/data/captain-shared.md" "downstream shared body"
+  chmod "$FM_SHARED_CAPTAIN_MODE" "$second/data/captain-shared.md"
+  err="$TMP_ROOT/undeterminable-destination.err"
+  report="$TMP_ROOT/undeterminable-destination.tsv"
+  : > "$report"
+
+  chmod 000 "$second/data"
+  status=0
+  FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_shared_captain_preferences "$primary/data" "$second/data" \
+    >/dev/null 2>"$err" || status=$?
+  chmod 700 "$second/data"
+
+  [ "$status" -ne 0 ] \
+    || fail "undeterminable destination: an unreadable secondmate data dir was reported as success"
+  grep -F "$(printf '%s\tunchanged' "$FM_SHARED_CAPTAIN_REL")" "$report" >/dev/null \
+    && fail "undeterminable destination: recorded as unchanged rather than a failure"
+  assert_contains "$(cat "$err")" 'undeterminable destination' \
+    "undeterminable destination: no diagnostic named the undeterminable state"
+  assert_contains "$(cat "$err")" 'is not searchable' \
+    "undeterminable destination: the diagnostic did not name the unsearchable directory"
+  assert_grep "downstream shared body" "$second/data/captain-shared.md" \
+    "undeterminable destination: the destination copy was modified"
+  assert_shared_readonly "$second/data/captain-shared.md"
+  [ -z "$(find "$second/data" -name '.captain-shared.md.quarantine.*' 2>/dev/null)" ] \
+    || fail "undeterminable destination: the destination copy was quarantined anyway"
+  pass "an undeterminable secondmate destination reports failure and leaves the copy intact"
+}
+
 test_unsafe_artifacts_and_failure_restore_readonly_mode() {
   local rec primary second other err before_mode rc
   rec=$(new_home_pair unsafe)
@@ -398,6 +444,7 @@ test_first_copy_readonly_and_local_files_preserved
 test_drift_quarantine_collision_and_repeated_convergence
 test_missing_source_mirrors_absence_without_losing_local_bytes
 test_undeterminable_source_leaves_the_destination_intact
+test_undeterminable_destination_is_reported_as_failure
 test_unsafe_artifacts_and_failure_restore_readonly_mode
 test_spawn_convergence_point_copies_shared_file
 test_bootstrap_convergence_point_copies_shared_file
