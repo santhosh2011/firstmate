@@ -666,7 +666,7 @@ families_for_changed_path() {
       printf '%s\n' pr-forge
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
-    bin/fm-peek.sh|bin/fm-composer*|bin/fm-no-go-lib.sh)
+    bin/fm-peek.sh|bin/fm-composer*|bin/fm-no-go-lib.sh|bin/fm-path-state-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       # Every script here also drives a secondmate launch, and the no-go library

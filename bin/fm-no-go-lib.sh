@@ -22,6 +22,9 @@
 # protection the operator believed was in force.
 #
 # docs/configuration.md "No-go paths" owns the operator-facing contract.
+#
+# shellcheck source=bin/fm-path-state-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-path-state-lib.sh"
 
 # config-dir-relative name of the declared prefix file.
 FM_NO_GO_FILE="no-go-paths"
@@ -91,13 +94,18 @@ fm_no_go_is_under() {  # <path> <prefix>
   return 1
 }
 
-# 0 when <path> exists and is a readable regular file, 1 when it is absent in
-# every form, 2 with the reason on stderr when it exists but cannot be read as
-# the declared prefix list.
+# 0 when <path> exists and is a readable regular file, 1 when it is PROVABLY
+# absent, 2 with the reason on stderr when it exists but cannot be read as the
+# declared prefix list, or when its state could not be established at all.
 fm_no_go_config_readable() {  # <path>
-  local file=$1 reason
-  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+  local file=$1 reason state=0
+  fm_path_state "$file" || state=$?
+  if [ "$state" -eq "$FM_PATH_STATE_ABSENT" ]; then
     return 1
+  fi
+  if [ "$state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+    echo "error: $file could not be classified because $FM_PATH_STATE_REASON, so the declared no-go paths cannot be read; refusing to dispatch" >&2
+    return 2
   fi
   if [ -L "$file" ] && [ ! -e "$file" ]; then
     reason="is a dangling symlink"

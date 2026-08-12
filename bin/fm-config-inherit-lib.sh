@@ -40,6 +40,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-no-go-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-no-go-lib.sh"
+# shellcheck source=bin/fm-path-state-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-path-state-lib.sh"
 
 # Set to 1 by propagate_inheritable_config when the primary HAS a no-go boundary
 # file and this run could not put it in the destination home. Every other item is
@@ -124,18 +126,24 @@ copy_inheritable_file() {
 }
 
 # Classify one inheritable source item: 0 when it is a readable regular file, 1
-# when it does not exist in any form, 2 with a reason on stdout when it exists
-# but cannot be read as one - a directory, a dangling symlink, a symlink to a
-# directory, or an unreadable file.
+# when it is PROVABLY absent, 2 with a reason on stdout when it exists but cannot
+# be read as one - a directory, a dangling symlink, a symlink to a directory, an
+# unreadable file - or when its state could not be established at all.
 #
-# The distinction is load-bearing. "Not a readable regular file" is NOT "the
-# primary has no value": mirroring it as absence would delete the destination's
-# inherited copy on the strength of a broken source, which for
-# config/no-go-paths means deleting the very boundary the operator declared.
+# The distinction is load-bearing. Neither "not a readable regular file" nor "I
+# could not look" is "the primary has no value": mirroring either as absence
+# would delete the destination's inherited copy on the strength of a source
+# nobody read, which for config/no-go-paths means deleting the very boundary the
+# operator declared. Only fm_path_state's provable absence may mirror.
 inheritable_source_state() {  # <src>
-  local src=$1
-  if [ ! -e "$src" ] && [ ! -L "$src" ]; then
+  local src=$1 state=0
+  fm_path_state "$src" || state=$?
+  if [ "$state" -eq "$FM_PATH_STATE_ABSENT" ]; then
     return 1
+  fi
+  if [ "$state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+    printf '%s' "undeterminable primary source ($FM_PATH_STATE_REASON)"
+    return 2
   fi
   if [ -L "$src" ] && [ ! -e "$src" ]; then
     printf '%s' "unusable primary source (dangling symlink)"
@@ -446,7 +454,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc src_state src_reason
+  local src_config=$1 dest_config=$2 item src dest reason rc src_state src_reason dest_state
   FM_CONFIG_INHERIT_BOUNDARY_FAILED=0
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
@@ -535,15 +543,32 @@ propagate_inheritable_config() {
       else
         record_inheritable_config_result "$item" unchanged ""
       fi
-    elif [ -e "$dest" ] || [ -L "$dest" ]; then
+    else
+      dest_state=0
+      fm_path_state "$dest" || dest_state=$?
+      if [ "$dest_state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+        reason="undeterminable destination ($FM_PATH_STATE_REASON)"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        if [ "$item" = "$FM_NO_GO_FILE" ]; then
+          FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+        fi
+        rc=1
+        continue
+      fi
+      if [ "$dest_state" -eq "$FM_PATH_STATE_ABSENT" ]; then
+        record_inheritable_config_result "$item" unchanged ""
+        continue
+      fi
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
-      # Primary genuinely has no value for this item: mirror the absence
-      # downstream. Only state 1 above reaches here, never an unusable source.
+      # Primary is PROVABLY without a value for this item: mirror the absence
+      # downstream. Only that one state reaches here - never an unusable source,
+      # never one nobody could read.
       if rm -f "$dest" 2>/dev/null; then
         record_inheritable_config_result "$item" pushed "mirrored primary absence"
       else
@@ -552,8 +577,6 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" error "$reason"
         rc=1
       fi
-    else
-      record_inheritable_config_result "$item" unchanged ""
     fi
   done
   return "$rc"

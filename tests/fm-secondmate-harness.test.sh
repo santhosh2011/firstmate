@@ -447,6 +447,52 @@ test_propagate_unusable_source_is_an_error_not_absence() {
   pass "B1b propagate_inheritable_config: an unusable primary source errors and never mirrors as absence"
 }
 
+# An unsearchable PRIMARY config/ is not "the primary has no value" - nobody
+# looked. Reading it as absence would run the mirror branch for EVERY item and
+# rm -f each secondmate home's inherited copy, including the boundary file, while
+# reporting success. This is the silent-data-destruction case: the downstream
+# copies must survive untouched and the caller must see a failure.
+test_propagate_undeterminable_source_dir_never_mirrors_absence() {
+  local d src dest status report stderr
+  if [ "$(id -u)" = 0 ]; then
+    pass "B1d propagate_inheritable_config: undeterminable source (skipped: root searches every directory)"
+    return 0
+  fi
+  d="$TMP_ROOT/prop-undeterminable"
+  src="$d/src"
+  dest="$d/home/config"
+  mkdir -p "$src" "$dest"
+  printf '/downstream/limit\n' > "$dest/no-go-paths"
+  printf 'codex\n' > "$dest/crew-harness"
+  printf '/primary/limit\n' > "$src/no-go-paths"
+  printf 'claude\n' > "$src/crew-harness"
+  report="$d/report.tsv"
+  stderr="$d/undeterminable.err"
+  : > "$report"
+
+  chmod 000 "$src"
+  status=0
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$dest" \
+    2>"$stderr" || status=$?
+  chmod 700 "$src"
+
+  [ "$status" -ne 0 ] \
+    || fail "undeterminable source: an unreadable primary config dir was not surfaced as a failure"
+  fm_config_inherit_boundary_failed \
+    || fail "undeterminable source: the boundary flag was not set"
+  [ "$(cat "$dest/no-go-paths" 2>/dev/null)" = /downstream/limit ] \
+    || fail "undeterminable source: the downstream boundary file was deleted or modified"
+  [ "$(cat "$dest/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "undeterminable source: an ordinary downstream item was deleted or modified"
+  grep -F 'mirrored primary absence' "$report" >/dev/null \
+    && fail "undeterminable source: reported as a successful absence mirror"
+  assert_contains "$(cat "$stderr")" 'undeterminable primary source' \
+    "undeterminable source: no diagnostic named the undeterminable state"
+  assert_contains "$(cat "$stderr")" 'is not searchable' \
+    "undeterminable source: the diagnostic did not name the unsearchable directory"
+  pass "B1d propagate_inheritable_config: an unreadable primary config dir errors and deletes nothing"
+}
+
 # The boundary flag stays scoped to config/no-go-paths: the same unusable-source
 # error on any other item is a plain non-fatal propagation failure, so a
 # secondmate launch is not aborted by an advisory item.
@@ -2549,6 +2595,7 @@ test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_propagate_unusable_source_is_an_error_not_absence
+test_propagate_undeterminable_source_dir_never_mirrors_absence
 test_unusable_source_boundary_flag_is_scoped_to_no_go_paths
 test_spawn_split_and_inherit
 test_spawn_refuses_when_the_boundary_file_cannot_be_inherited

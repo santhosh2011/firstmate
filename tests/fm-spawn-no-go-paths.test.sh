@@ -264,11 +264,14 @@ ROWS
 # fake pane reports FM_FAKE_PANE_PATH as the settled worktree.
 
 # The tmux stub records every invocation when FM_FAKE_TMUX_LOG is set, so a case
-# can assert which window fm-spawn asked the backend to close. The treehouse stub
-# implements the one subcommand this suite exercises for real - `return --force
-# <dir>` removes that worktree from the project it was added to - because a case
-# that asserts a refusal left nothing behind has to observe the worktree actually
-# disappear, not that a command was attempted.
+# can assert which window fm-spawn asked the backend to close.
+#
+# The treehouse stub models the real tool's two verbs FAITHFULLY, because the
+# difference between them is exactly what these cases are testing. `return` is a
+# POOL RETURN: the real command hands the slot back and the directory stays
+# exactly where it is, so the fake leaves it in place and drops a marker. Only
+# `destroy` removes. A fake that removed on `return` would let an assertion pass
+# against production behavior that never happens.
 make_worktree_fakebin() {  # <dir>
   local fakebin
   fakebin=$(fm_fakebin "$1")
@@ -288,12 +291,25 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ "${1:-}" = return ]; then
-  shift
-  [ "${1:-}" != --force ] || shift
-  [ -n "${1:-}" ] || exit 1
-  git worktree remove --force "$1" >/dev/null 2>&1 || exit 1
-fi
+verb=${1:-}
+shift || true
+target=
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) [ -n "$target" ] || target=$arg ;;
+  esac
+done
+case "$verb" in
+  return)
+    [ -n "$target" ] && [ -d "$target" ] || exit 1
+    : > "$target/.fake-returned-to-pool"
+    ;;
+  destroy)
+    [ -n "$target" ] || exit 1
+    git worktree remove --force "$target" >/dev/null 2>&1 || exit 1
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -371,8 +387,9 @@ EOF
 
 # The refusal must not stop at "do not launch": the worktree it refuses sits
 # INSIDE the operator's off-limits directory, so the invocation has to unwind the
-# worktree and the window it opened. The fake treehouse performs the real
-# removal, so this asserts the checkout is gone rather than that a command ran.
+# worktree and the window it opened. Returning it to the pool would not do -
+# the pool is inside that prefix too - so this asserts the directory is GONE,
+# which only `treehouse destroy` produces in the faithful fake above.
 test_worktree_refusal_unwinds_the_worktree_and_window() {
   local id home proj wt fakebin out status log kill_line
   id=nogo-wtclean-q9
@@ -388,6 +405,8 @@ EOF
   [ "$status" -ne 0 ] || fail "a worktree inside a no-go path must refuse: $out"
   assert_contains "$out" "$REFUSAL" "the resolved worktree was not checked"
   assert_absent "$wt" "the refusal left its worktree inside the no-go path"
+  assert_absent "$wt/.fake-returned-to-pool" \
+    "the refusal recycled the worktree into the pool instead of destroying it"
   kill_line=$(grep -F 'kill-window' "$log" || true)
   [ -n "$kill_line" ] || fail "the refusal did not close the window it opened"
   printf '%s\n' "$kill_line" | grep -F "fm-$id" >/dev/null \
@@ -550,7 +569,91 @@ test_assert_status_contract() {
   pass "fm_no_go_assert allows only a genuinely allowed path and refuses both refusal states"
 }
 
+# --- absence must be provable, not merely unobserved -------------------------
+#
+# The shell's existence tests answer "no" both when an entry is not there and
+# when it could not be looked up. Reading the second as the first is what turns
+# an unsearchable config/ into "no restriction declared". The dispatch below
+# targets @D/allowed, which no prefix could match, so a refusal can only come
+# from the undeterminable config state itself.
+test_unsearchable_config_dir_refuses() {
+  local d out status
+  if [ "$(id -u)" = 0 ]; then
+    pass "config-dir searchability (skipped: root searches every directory)"
+    return 0
+  fi
+  d=$(new_case unsearchable-config)
+  printf '%s\n' "$d/nogo" > "$d/home/config/no-go-paths"
+  chmod 000 "$d/home/config"
+  out=$(run_spawn "$d" nogo-unsearch-q7 "$d/allowed" codex)
+  status=$?
+  chmod 700 "$d/home/config"
+  [ "$status" -ne 0 ] || fail "an unsearchable config dir must not silently allow a dispatch: $out"
+  printf '%s\n' "$out" | grep -F 'could not be classified' >/dev/null \
+    || fail "the refusal did not report an undeterminable config state: $out"
+  printf '%s\n' "$out" | grep -F 'is not searchable' >/dev/null \
+    || fail "the refusal did not name the unsearchable directory as the reason: $out"
+  printf '%s\n' "$out" | grep -F 'no brief at' >/dev/null \
+    && fail "the refusal must precede the brief check"
+  pass "a config/ directory that cannot be searched refuses instead of reading as unrestricted"
+}
+
+# --- the shared tri-state classifier ----------------------------------------
+#
+# One owner for the EXISTS / PROVABLY ABSENT / UNDETERMINABLE question, driven
+# against real filesystem states.
+test_path_state_contract() {
+  local d state
+  d=$(new_case path-state)
+  # shellcheck source=bin/fm-path-state-lib.sh
+  . "$ROOT/bin/fm-path-state-lib.sh"
+
+  state=0; fm_path_state "$d/allowed" || state=$?
+  expect_code "$FM_PATH_STATE_EXISTS" "$state" "an existing directory must classify as EXISTS"
+
+  printf 'x\n' > "$d/allowed/file"
+  state=0; fm_path_state "$d/allowed/file" || state=$?
+  expect_code "$FM_PATH_STATE_EXISTS" "$state" "an existing file must classify as EXISTS"
+
+  ln -s "$d/gone" "$d/allowed/dangling"
+  state=0; fm_path_state "$d/allowed/dangling" || state=$?
+  expect_code "$FM_PATH_STATE_EXISTS" "$state" "a dangling symlink is present, not absent"
+
+  state=0; fm_path_state "$d/allowed/missing" || state=$?
+  expect_code "$FM_PATH_STATE_ABSENT" "$state" "a missing entry under a searchable dir must be PROVABLY ABSENT"
+  [ -z "$FM_PATH_STATE_REASON" ] || fail "a provable absence must not carry a reason"
+
+  state=0; fm_path_state "$d/no/such/chain/entry" || state=$?
+  expect_code "$FM_PATH_STATE_ABSENT" "$state" "a genuinely missing ancestor chain is still PROVABLY ABSENT"
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$d/allowed"
+    state=0; fm_path_state "$d/allowed/file" || state=$?
+    chmod 700 "$d/allowed"
+    expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" \
+      "an entry under an unsearchable dir must be UNDETERMINABLE, never absent"
+
+    chmod 000 "$d/allowed"
+    state=0; fm_path_state "$d/allowed/missing" || state=$?
+    chmod 700 "$d/allowed"
+    expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" \
+      "a lookup that could not happen must be UNDETERMINABLE, never absent"
+
+    chmod 000 "$d/allowed"
+    state=0; fm_path_state "$d/allowed/deeper/entry" || state=$?
+    chmod 700 "$d/allowed"
+    expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" \
+      "an unsearchable ancestor must make the whole chain UNDETERMINABLE"
+  fi
+
+  state=0; fm_path_state "" || state=$?
+  expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" "an empty path must be UNDETERMINABLE"
+  pass "fm_path_state separates EXISTS, provable absence, and an undeterminable lookup"
+}
+
 test_prefix_matching
+test_path_state_contract
+test_unsearchable_config_dir_refuses
 test_worktree_inside_a_no_go_path_is_refused
 test_worktree_refusal_unwinds_the_worktree_and_window
 test_refusal_leaves_an_unproven_worktree_in_place

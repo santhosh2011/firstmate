@@ -276,6 +276,8 @@ Blank lines and lines whose first non-blank character is `#` are ignored.
 Trailing slashes are tolerated, and a leading `~` or `~/` expands to `$HOME`.
 A non-empty line that is not an absolute path after that expansion refuses the spawn as a configuration error instead of being skipped, because a silently dropped line is a protection you believed was in force.
 Absence is the only unrestricted state, for the same reason: a `config/no-go-paths` that exists but cannot be read as a regular file, such as a directory or a dangling symlink into a dotfiles tree you have since reorganised, refuses the spawn and names the path and the reason rather than being read as no restriction at all.
+Absence must also be provable, not merely unobserved.
+If `config/` itself cannot be searched, because it is a symlink into a volume you have not mounted or has lost its search permission, the file's state is undeterminable rather than absent, and that too refuses the spawn and names the reason.
 
 `bin/fm-spawn.sh` refuses when either the task's project directory or its final worktree resolves inside a declared prefix.
 Comparison is on canonicalised absolute paths and matches only on a path-component boundary, so `/a/b` blocks `/a/b` and `/a/b/c` but never `/a/bc`.
@@ -288,7 +290,9 @@ The project-directory check runs before any window, worktree, temp root, hook, s
 The worktree check necessarily runs later.
 No worktree provider - `treehouse get`, `sdev new`, or Orca - reveals its destination before it creates it, so that check runs as soon as the path is known: still ahead of every state, metadata, hook, and temp artifact, but after the backend window has been created.
 That refusal then removes the worktree and closes the window this dispatch itself created, so a refusal at either point leaves nothing behind.
-Each provider is unwound with its own removing verb: a treehouse worktree goes back to its pool with `treehouse return --force`, and an SDev workspace is removed outright with `sdev destroy --force`, which deletes the per-repo worktrees, the port offset, and the ledger entry rather than archiving them.
+A no-go refusal is the one abort that removes rather than recycles, because the worktree is somewhere it must not be and the pool it would return to may itself sit inside the declared prefix.
+So it calls `treehouse destroy`, which deletes the worktree, and `sdev destroy --force`, which deletes the per-repo worktrees, the port offset, and the ledger entry rather than archiving them.
+Every other abort in that window keeps the ordinary recycling verb, `treehouse return --force`, which hands the worktree back to the pool for the next spawn, and that stays the behavior for teardown too.
 Removal is deliberately conservative and only ever unwinds what this dispatch itself created: the SDev branch acts only on the workspace this invocation's own `sdev new` produced, and every checkout must be provably clean, meaning `git status` both succeeded and reported nothing.
 Any probe that cannot establish that - an unreadable repository, a `git status` that fails, a path this dispatch did not create - makes the refusal warn and name the directory and the reason instead of deleting anything uncertain.
 Declaring the worktree pool root itself in `config/no-go-paths` is what makes that case refuse before a window is ever opened.

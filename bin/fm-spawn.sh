@@ -290,6 +290,12 @@ SPAWN_WINDOW_ABORT_TAB=
 # own `sdev new` succeeded, alongside the workspace path that call resolved to.
 SPAWN_SDEV_CREATED=0
 SPAWN_SDEV_CREATED_PATH=
+# Set only when the no-go worktree assertion is what failed. The armed span is
+# wider than that one refusal, and the two want different verbs: an ordinary
+# abort returns the worktree to treehouse's pool, while a worktree sitting inside
+# a declared off-limits prefix must leave that prefix entirely, so pooling it is
+# exactly the wrong move.
+SPAWN_WORKTREE_ABORT_NO_GO=0
 # Why the last safety probe refused, so the warning names the reason rather than
 # a generic "cannot prove".
 SPAWN_ABORT_UNSAFE_REASON=
@@ -408,8 +414,22 @@ spawn_abort_remove_task_worktree() {
         echo "warning: treehouse is unavailable, so worktree $dir created by this aborted spawn is still in place; return it manually" >&2
         return 0
       fi
-      out=$( ( CDPATH='' cd -- "$PROJ_ABS" && treehouse return --force "$dir" ) 2>&1 ) \
-        || echo "warning: could not return worktree $dir created by this aborted spawn; return it manually${out:+: $(first_line "$out")}" >&2
+      if [ "$SPAWN_WORKTREE_ABORT_NO_GO" = 1 ]; then
+        # `return` hands the worktree back to the pool, and the pool directory is
+        # itself inside the declared prefix here, so only `destroy` gets it out.
+        # Deliberately without --include-unlanded: the clean probe above already
+        # proved there is nothing to lose, and destroy must never be the thing
+        # that overrides unlanded work.
+        out=$( ( CDPATH='' cd -- "$PROJ_ABS" \
+          && treehouse destroy "$dir" --yes --include-in-use --include-leased ) 2>&1 ) \
+          || echo "warning: could not destroy worktree $dir created by this refused spawn; remove it manually${out:+: $(first_line "$out")}" >&2
+        if [ -d "$dir" ]; then
+          echo "warning: worktree $dir is still present inside the declared no-go path after treehouse destroy; remove it manually" >&2
+        fi
+      else
+        out=$( ( CDPATH='' cd -- "$PROJ_ABS" && treehouse return --force "$dir" ) 2>&1 ) \
+          || echo "warning: could not return worktree $dir created by this aborted spawn; return it manually${out:+: $(first_line "$out")}" >&2
+      fi
       ;;
     sdev)
       if ! spawn_abort_sdev_workspace_is_removable "$dir"; then
@@ -1608,7 +1628,10 @@ fi
 # An operator who needs a refusal before a window is ever opened declares the
 # worktree pool root itself (docs/configuration.md "No-go paths").
 if [ "$KIND" != secondmate ]; then
-  fm_no_go_assert "task worktree" "$WT" "$CONFIG" || exit 1
+  if ! fm_no_go_assert "task worktree" "$WT" "$CONFIG"; then
+    SPAWN_WORKTREE_ABORT_NO_GO=1
+    exit 1
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
