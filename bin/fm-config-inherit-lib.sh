@@ -38,6 +38,21 @@
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-no-go-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-no-go-lib.sh"
+
+# Set to 1 by propagate_inheritable_config when the primary HAS a no-go boundary
+# file and this run could not put it in the destination home. Every other item is
+# advisory configuration and stays a warning; this one is a safety boundary, so a
+# caller that is about to launch that home must treat it as fatal rather than
+# running a home whose crewmates would see no restriction at all. A primary with
+# NO boundary file is the unrestricted default and never sets this. Read it
+# through fm_config_inherit_boundary_failed rather than the variable.
+FM_CONFIG_INHERIT_BOUNDARY_FAILED=0
+
+fm_config_inherit_boundary_failed() {
+  [ "$FM_CONFIG_INHERIT_BOUNDARY_FAILED" = 1 ]
+}
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -142,7 +157,11 @@ destination_allows_inherited_item() {
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
 # do not affect the exit code. Returns non-zero only when a real propagation
-# error, such as copy or remove failure, occurs.
+# error, such as copy or remove failure, occurs. The one exception is the no-go
+# boundary file: when the primary HAS one and it could not be written to the
+# destination, that is an error rather than a warning, and it additionally sets
+# FM_CONFIG_INHERIT_BOUNDARY_FAILED so a caller about to launch that home can
+# refuse instead of running it unrestricted.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
   [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0
@@ -398,6 +417,7 @@ propagate_secondmate_inheritance() {
 
 propagate_inheritable_config() {
   local src_config=$1 dest_config=$2 item src dest reason rc
+  FM_CONFIG_INHERIT_BOUNDARY_FAILED=0
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -453,6 +473,10 @@ propagate_inheritable_config() {
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
+        if [ "$item" = "$FM_NO_GO_FILE" ]; then
+          FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+          rc=1
+        fi
         continue
       fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
@@ -462,6 +486,9 @@ propagate_inheritable_config() {
           reason="failed to copy"
           warn_inheritable_config_error "$item" "$dest" "$reason"
           record_inheritable_config_result "$item" error "$reason"
+          if [ "$item" = "$FM_NO_GO_FILE" ]; then
+            FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+          fi
           rc=1
         fi
       else

@@ -263,12 +263,19 @@ ROWS
 # drives it against a real git worktree without touching a real terminal: the
 # fake pane reports FM_FAKE_PANE_PATH as the settled worktree.
 
+# The tmux stub records every invocation when FM_FAKE_TMUX_LOG is set, so a case
+# can assert which window fm-spawn asked the backend to close. The treehouse stub
+# implements the one subcommand this suite exercises for real - `return --force
+# <dir>` removes that worktree from the project it was added to - because a case
+# that asserts a refusal left nothing behind has to observe the worktree actually
+# disappear, not that a command was attempted.
 make_worktree_fakebin() {  # <dir>
   local fakebin
   fakebin=$(fm_fakebin "$1")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -278,7 +285,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = return ]; then
+  shift
+  [ "${1:-}" != --force ] || shift
+  [ -n "${1:-}" ] || exit 1
+  git worktree remove --force "$1" >/dev/null 2>&1 || exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -300,11 +318,12 @@ make_worktree_case() {  # <name> <id>
   printf '%s|%s|%s|%s\n' "$home" "$proj" "$wt" "$fakebin"
 }
 
-run_worktree_spawn() {  # <home> <project> <worktree> <fakebin> <id>
+run_worktree_spawn() {  # <home> <project> <worktree> <fakebin> <id> [tmux-log]
   FM_ROOT_OVERRIDE='' FM_HOME="$1" \
     FM_STATE_OVERRIDE="$1/state" FM_DATA_OVERRIDE="$1/data" \
     FM_PROJECTS_OVERRIDE="$1/projects" FM_CONFIG_OVERRIDE="$1/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_TMUX_LOG="${6:-}" \
     FM_FAKE_PANE_PATH="$3" PATH="$4:$PATH" \
     "$SPAWN" "$5" "$2" 2>&1
 }
@@ -344,9 +363,156 @@ EOF
   pass "with no config file the same worktree spawns and is recorded as before"
 }
 
+# The refusal must not stop at "do not launch": the worktree it refuses sits
+# INSIDE the operator's off-limits directory, so the invocation has to unwind the
+# worktree and the window it opened. The fake treehouse performs the real
+# removal, so this asserts the checkout is gone rather than that a command ran.
+test_worktree_refusal_unwinds_the_worktree_and_window() {
+  local id home proj wt fakebin out status log kill_line
+  id=nogo-wtclean-q9
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_worktree_case worktree-unwound "$id")
+EOF
+  log="$home/tmux.log"
+  [ -d "$wt" ] || fail "fixture did not create the worktree"
+  printf '%s\n' "$(dirname "$wt")" > "$home/config/no-go-paths"
+  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$log")
+  status=$?
+  rm -rf "/tmp/fm-$id"
+  [ "$status" -ne 0 ] || fail "a worktree inside a no-go path must refuse: $out"
+  assert_contains "$out" "$REFUSAL" "the resolved worktree was not checked"
+  assert_absent "$wt" "the refusal left its worktree inside the no-go path"
+  kill_line=$(grep -F 'kill-window' "$log" || true)
+  [ -n "$kill_line" ] || fail "the refusal did not close the window it opened"
+  printf '%s\n' "$kill_line" | grep -F "fm-$id" >/dev/null \
+    || fail "the refusal closed a window other than its own: $kill_line"
+  assert_absent "$home/state/$id.meta" "the worktree refusal wrote metadata"
+  pass "a worktree refusal removes the worktree and closes the window it created"
+}
+
+# The counterpart of that unwind: a completed spawn owns its worktree, so the
+# same EXIT trap must leave it alone.
+test_completed_spawn_keeps_its_worktree_and_window() {
+  local id home proj wt fakebin out status log
+  id=nogo-wtkeep-q9
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_worktree_case worktree-kept "$id")
+EOF
+  log="$home/tmux.log"
+  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$log")
+  status=$?
+  rm -rf "/tmp/fm-$id"
+  expect_code 0 "$status" "an unrestricted spawn must still complete"
+  [ -d "$wt" ] || fail "a completed spawn removed its own worktree: $out"
+  grep -F "kill-window" "$log" >/dev/null \
+    && fail "a completed spawn closed its own window"
+  pass "a completed spawn keeps the worktree and window it created"
+}
+
+# --- a present but unusable config file fails closed -------------------------
+#
+# Absence is the ONLY unrestricted state. A config/no-go-paths that exists in any
+# other form is a boundary the operator declared and fm-spawn cannot read, so it
+# refuses instead of reading it as "no restriction". Every case dispatches at
+# @D/allowed, which no prefix could match, so the refusal can only come from the
+# unreadable file itself.
+test_unreadable_config_refuses() {
+  local d out status n=0 label
+  for label in directory dangling-symlink symlink-to-directory unreadable-file; do
+    n=$((n + 1))
+    d=$(new_case "unreadable-$n")
+    case "$label" in
+      directory) mkdir -p "$d/home/config/no-go-paths" ;;
+      dangling-symlink) ln -s "$d/gone/no-go-paths" "$d/home/config/no-go-paths" ;;
+      symlink-to-directory) ln -s "$d/nogo" "$d/home/config/no-go-paths" ;;
+      unreadable-file)
+        [ "$(id -u)" != 0 ] || continue
+        printf '%s\n' "$d/nogo" > "$d/home/config/no-go-paths"
+        chmod 000 "$d/home/config/no-go-paths"
+        ;;
+    esac
+    out=$(run_spawn "$d" "nogo-unread$n-q7" "$d/allowed" codex)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: an unreadable config must not spawn"
+    printf '%s\n' "$out" | grep -F 'the declared no-go paths cannot be read' >/dev/null \
+      || fail "$label: expected an unreadable-config refusal, got: $out"
+    printf '%s\n' "$out" | grep -F "$d/home/config/no-go-paths" >/dev/null \
+      || fail "$label: the refusal did not name the config path: $out"
+    printf '%s\n' "$out" | grep -F 'no brief at' >/dev/null \
+      && fail "$label: the refusal must precede the brief check"
+  done
+  pass "a config/no-go-paths that exists but is not a readable regular file refuses"
+}
+
+# A symlink INTO a readable regular file is the working dotfiles case and must
+# keep restricting normally - the fail-closed rule above is about unusable files,
+# not about symlinks.
+test_symlinked_config_still_restricts() {
+  local d out status
+  d=$(new_case symlinked)
+  printf '%s\n' "$d/nogo" > "$d/dotfiles-no-go-paths"
+  ln -s "$d/dotfiles-no-go-paths" "$d/home/config/no-go-paths"
+  out=$(run_spawn "$d" nogo-symlink-q7 "$d/nogo/proj" codex)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a symlinked config must still refuse a matching path"
+  printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
+    || fail "a config symlinked to a readable regular file stopped restricting: $out"
+  pass "a config symlinked to a readable regular file restricts exactly as a plain file does"
+}
+
+# --- fm_no_go_assert's three-way status contract ----------------------------
+#
+# fm_no_go_match reports three distinct states (inside a prefix, allowed,
+# unusable config) and fm_no_go_assert collapses them to the two its callers act
+# on. Drive the library directly so all three inputs are covered, including the
+# unusable-config state that must NOT be mistaken for "allowed".
+test_assert_status_contract() {
+  local d err status
+  d=$(new_case assert-contract)
+  err="$d/assert.err"
+  # shellcheck source=bin/fm-no-go-lib.sh
+  . "$ROOT/bin/fm-no-go-lib.sh"
+
+  status=0
+  fm_no_go_assert "project directory" "$d/allowed" "$d/home/config" 2>"$err" || status=$?
+  expect_code 0 "$status" "an absent config must allow"
+  [ ! -s "$err" ] || fail "an allowed path wrote to stderr: $(cat "$err")"
+
+  printf '%s\n' "$d/nogo" > "$d/home/config/no-go-paths"
+  status=0
+  fm_no_go_assert "project directory" "$d/allowed" "$d/home/config" 2>"$err" || status=$?
+  expect_code 0 "$status" "a path outside every prefix must allow"
+  [ ! -s "$err" ] || fail "an allowed path wrote to stderr: $(cat "$err")"
+
+  status=0
+  fm_no_go_assert "project directory" "$d/nogo/proj" "$d/home/config" 2>"$err" || status=$?
+  expect_code 1 "$status" "a path inside a prefix must refuse"
+  assert_contains "$(cat "$err")" "project directory" "the refusal dropped the label"
+  assert_contains "$(cat "$err")" "$d/nogo/proj" "the refusal dropped the offending path"
+  assert_contains "$(cat "$err")" "'$d/nogo'" "the refusal dropped the matching prefix"
+  assert_contains "$(cat "$err")" "config/no-go-paths" "the refusal dropped the config file"
+
+  printf 'not-absolute\n' > "$d/home/config/no-go-paths"
+  status=0
+  fm_no_go_assert "project directory" "$d/allowed" "$d/home/config" 2>"$err" || status=$?
+  expect_code 1 "$status" "a malformed config must refuse an otherwise allowed path"
+
+  rm -f "$d/home/config/no-go-paths"
+  mkdir -p "$d/home/config/no-go-paths"
+  status=0
+  fm_no_go_assert "project directory" "$d/allowed" "$d/home/config" 2>"$err" || status=$?
+  expect_code 1 "$status" "an unusable config must refuse an otherwise allowed path"
+  pass "fm_no_go_assert allows only a genuinely allowed path and refuses both refusal states"
+}
+
 test_prefix_matching
 test_worktree_inside_a_no_go_path_is_refused
+test_worktree_refusal_unwinds_the_worktree_and_window
+test_completed_spawn_keeps_its_worktree_and_window
 test_worktree_outside_a_no_go_path_completes
+test_unreadable_config_refuses
+test_symlinked_config_still_restricts
+test_assert_status_contract
 test_absent_file_is_unrestricted
 test_refusal_names_path_and_prefix
 test_refusal_leaves_no_state

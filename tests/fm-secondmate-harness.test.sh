@@ -478,6 +478,104 @@ test_spawn_split_and_inherit() {
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
 }
 
+# Same as spawn_secondmate, but surfaces the spawn's own exit status and output
+# so a case can assert that a launch was REFUSED rather than merely warned about.
+spawn_secondmate_status() {  # <world> <id> <home>
+  local world=$1 id=$2 home=$3 fakebin
+  mkdir -p "$world/home/state" "$world/home/data"
+  fakebin=$(make_noop_tmux "$world/tmux-$id")
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" --secondmate 2>&1
+}
+
+# A seeded secondmate home that is its own git repo, so the destination guard is
+# actually consulted: it allows an inherited item only when the home's repo
+# ignores that path. Anything not listed in <ignored...> is therefore skipped.
+make_git_seeded_home() {  # <home> <id> [ignored-config-rel-path...]
+  local home=$1 id=$2 rel
+  make_seeded_home "$home" "$id"
+  git init -q -b main "$home"
+  : > "$home/.gitignore"
+  shift 2
+  for rel in "$@"; do
+    printf '%s\n' "$rel" >> "$home/.gitignore"
+  done
+  git -C "$home" add .gitignore AGENTS.md
+  git -C "$home" commit -qm seed
+}
+
+# The boundary file is the one inherited item whose propagation failure is not
+# advisory: a home launched without it would dispatch its OWN crewmates into the
+# operator's off-limits directories. So a skipped no-go-paths push refuses the
+# launch, while the same skip on any other item stays the warning it has always
+# been.
+test_spawn_refuses_when_the_boundary_file_cannot_be_inherited() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-boundary-fatal"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf '/off/limits\n' > "$w/home/config/no-go-paths"
+  make_git_seeded_home "$sm" sm config/crew-harness
+
+  out=$(spawn_secondmate_status "$w" sm "$sm")
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "boundary: a home that cannot inherit no-go-paths must not launch: $out"
+  assert_contains "$out" "could not inherit config/no-go-paths" \
+    "boundary: the refusal did not name the boundary file"
+  [ ! -e "$sm/config/no-go-paths" ] \
+    || fail "boundary: the home was left with a boundary file the guard reported as skipped"
+  [ ! -e "$w/home/state/sm.meta" ] \
+    || fail "boundary: a refused secondmate launch still wrote task metadata"
+  pass "B2b spawn: a secondmate that cannot inherit config/no-go-paths is refused, not warned"
+}
+
+# The control for that refusal: the identical fixture with the home ignoring the
+# boundary file propagates it and launches, so the refusal above comes from the
+# failed push and not from having a boundary file at all.
+test_spawn_launches_when_the_boundary_file_inherits() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-boundary-ok"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf '/off/limits\n' > "$w/home/config/no-go-paths"
+  make_git_seeded_home "$sm" sm config/no-go-paths config/crew-harness
+
+  out=$(spawn_secondmate_status "$w" sm "$sm")
+  status=$?
+
+  expect_code 0 "$status" "boundary control: an inheritable boundary file must still launch"
+  [ "$(cat "$sm/config/no-go-paths" 2>/dev/null)" = /off/limits ] \
+    || fail "boundary control: the boundary file was not propagated: $out"
+  [ -f "$w/home/state/sm.meta" ] || fail "boundary control: no meta written: $out"
+  pass "B2c spawn: a secondmate whose home accepts the boundary file launches as before"
+}
+
+# The hard constraint on that fatality: a PRIMARY with no config/no-go-paths is
+# the unrestricted default, so mirroring that absence downstream must stay
+# non-fatal even when the destination guard refuses the removal.
+test_spawn_absent_primary_boundary_stays_non_fatal() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-boundary-absent"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  make_git_seeded_home "$sm" sm config/crew-harness
+  mkdir -p "$sm/config"
+  printf '/stale/limit\n' > "$sm/config/no-go-paths"
+
+  out=$(spawn_secondmate_status "$w" sm "$sm")
+  status=$?
+
+  expect_code 0 "$status" "absent primary boundary: an unrestricted primary must still launch"
+  [ -f "$w/home/state/sm.meta" ] || fail "absent primary boundary: no meta written: $out"
+  pass "B2d spawn: an unrestricted primary still launches when the downstream absence-mirror is skipped"
+}
+
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
 # crew harness, exactly as before this knob existed, and that crew value is the
 # one inherited.
@@ -2324,6 +2422,9 @@ test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
+test_spawn_refuses_when_the_boundary_file_cannot_be_inherited
+test_spawn_launches_when_the_boundary_file_inherits
+test_spawn_absent_primary_boundary_stays_non_fatal
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins

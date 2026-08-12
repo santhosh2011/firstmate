@@ -273,6 +273,19 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+# Non-Orca task worktree/window teardown, armed only at the single point where a
+# provider handed this invocation its own freshly created worktree and disarmed
+# once the task owns its metadata. Same discipline as ORCA_ABORT_CLEANUP above:
+# an explicit flag plus the recorded identifiers, cleaned on the EXIT trap, so an
+# abort between those two points - the no-go worktree refusal above all - leaves
+# no checkout and no window behind.
+SPAWN_WORKTREE_ABORT_CLEANUP=0
+SPAWN_WORKTREE_ABORT_PROVIDER=
+SPAWN_WORKTREE_ABORT_PATH=
+SPAWN_WINDOW_ABORT_CLEANUP=0
+SPAWN_WINDOW_ABORT_BACKEND=
+SPAWN_WINDOW_ABORT_TARGET=
+SPAWN_WINDOW_ABORT_TAB=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -291,8 +304,91 @@ parse_orca_worktree_result() {
   fi
 }
 
+# A directory that is its own git worktree root and has nothing uncommitted.
+# Anything else - a missing dir, a nested path, a dirty tree, an unreadable repo -
+# is something this abort must not touch.
+spawn_abort_worktree_root_is_clean() {  # <dir>
+  local dir=$1 dir_real top
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  dir_real=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$top" = "$dir_real" ] || return 1
+  [ -z "$(git -C "$dir" status --porcelain 2>/dev/null)" ]
+}
+
+# Additionally: the worktree must be a linked worktree of THIS spawn's project,
+# so an abort can only ever unwind the checkout `treehouse get` just handed it.
+spawn_abort_treehouse_worktree_is_removable() {  # <dir>
+  local dir=$1 common proj_common
+  spawn_abort_worktree_root_is_clean "$dir" || return 1
+  common=$(CDPATH='' cd -- "$dir" 2>/dev/null \
+    && cd -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
+  proj_common=$(CDPATH='' cd -- "$PROJ_ABS" 2>/dev/null \
+    && cd -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
+  [ "$common" = "$proj_common" ]
+}
+
+spawn_abort_sdev_workspace_is_removable() {  # <dir>
+  local dir=$1 rp
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  while IFS= read -r rp; do
+    [ -n "$rp" ] || continue
+    spawn_abort_worktree_root_is_clean "$dir/$rp" || return 1
+  done <<EOF
+${SDEV_REPO_PATHS:-}
+EOF
+}
+
+# Unwind the worktree this invocation's own provider created. Every failure path
+# warns and leaves the directory alone: an aborted spawn that cannot prove what
+# it is deleting must not delete it.
+spawn_abort_remove_task_worktree() {
+  local dir=$SPAWN_WORKTREE_ABORT_PATH
+  case "$SPAWN_WORKTREE_ABORT_PROVIDER" in
+    treehouse)
+      if ! spawn_abort_treehouse_worktree_is_removable "$dir"; then
+        echo "warning: leaving worktree $dir in place: it is not a clean worktree of $PROJ_ABS, so this aborted spawn cannot prove it is safe to remove" >&2
+        return 0
+      fi
+      if ! command -v treehouse >/dev/null 2>&1; then
+        echo "warning: treehouse is unavailable, so worktree $dir created by this aborted spawn is still in place; return it manually" >&2
+        return 0
+      fi
+      ( CDPATH='' cd -- "$PROJ_ABS" && treehouse return --force "$dir" ) >/dev/null 2>&1 \
+        || echo "warning: could not return worktree $dir created by this aborted spawn; return it manually" >&2
+      ;;
+    sdev)
+      if ! spawn_abort_sdev_workspace_is_removable "$dir"; then
+        echo "warning: leaving SDev workspace $dir in place: at least one of its repos is not a clean worktree root, so this aborted spawn cannot prove it is safe to archive" >&2
+        return 0
+      fi
+      if ! command -v sdev >/dev/null 2>&1; then
+        echo "warning: sdev is unavailable, so workspace $dir created by this aborted spawn is still in place; archive it manually" >&2
+        return 0
+      fi
+      SDEV_HOME="${SDEV_HOME_DIR:-}" sdev -p "${SDEV_PROJ:-}" end "${SDEV_SLUG:-}" >/dev/null 2>&1 \
+        || echo "warning: could not archive SDev workspace $dir created by this aborted spawn; archive it manually" >&2
+      ;;
+  esac
+}
+
+spawn_arm_worktree_abort_cleanup() {  # <provider> <worktree>
+  SPAWN_WORKTREE_ABORT_PROVIDER=$1
+  SPAWN_WORKTREE_ABORT_PATH=$2
+  SPAWN_WORKTREE_ABORT_CLEANUP=1
+  SPAWN_WINDOW_ABORT_BACKEND=$BACKEND
+  SPAWN_WINDOW_ABORT_TARGET=$T
+  SPAWN_WINDOW_ABORT_TAB=${ZELLIJ_TAB_ID:-}
+  SPAWN_WINDOW_ABORT_CLEANUP=1
+}
+
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_WORKTREE_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_WORKTREE_ABORT_CLEANUP=0
+    spawn_abort_remove_task_worktree
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -338,6 +434,13 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  # After the herdr and orca branches: a projected herdr pane has its own exact
+  # teardown above, and this is the flat close for every other backend.
+  if [ "$SPAWN_WINDOW_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_WINDOW_ABORT_CLEANUP=0
+    fm_backend_kill "$SPAWN_WINDOW_ABORT_BACKEND" "$SPAWN_WINDOW_ABORT_TARGET" \
+      "$SPAWN_WINDOW_ABORT_TAB" "fm-$ID" 2>/dev/null || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -837,9 +940,17 @@ if [ "$KIND" = secondmate ]; then
   fi
   CONFIG_INHERIT_LOCK_HELD=1
   # Inheritance propagation: push the primary-authoritative local inheritance
-  # surface into this secondmate home (fm-config-inherit-lib.sh).
+  # surface into this secondmate home (fm-config-inherit-lib.sh). Every item but
+  # one is advisory configuration whose failure is a warning the next convergence
+  # retries. config/no-go-paths is not: launching a home without the boundary the
+  # primary declared would let that home's own crewmates be dispatched straight
+  # into the operator's off-limits directories, so that one failure refuses.
   propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
     || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+  if fm_config_inherit_boundary_failed; then
+    echo "error: secondmate $ID could not inherit config/$FM_NO_GO_FILE into $PROJ_ABS; refusing to launch a home that would not hold its crewmates to the declared no-go paths" >&2
+    exit 1
+  fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -1323,6 +1434,7 @@ spawn_sdev_workspace() {  # create the workspace and place the crewmate in it
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$IS_SDEV" = 1 ]; then
   spawn_sdev_workspace
+  spawn_arm_worktree_abort_cleanup sdev "$WT"
 fi
 
 kimi_capture() {
@@ -1424,15 +1536,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$IS_SDEV" != 1 ]; t
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  spawn_arm_worktree_abort_cleanup treehouse "$WT"
 fi
 
 # The task's final worktree, whichever provider produced it - treehouse above,
 # `sdev new`, or Orca - against the declared no-go paths. A secondmate's worktree
 # IS its home, already checked before any mutation. This check cannot run any
 # earlier: no provider reveals its destination before it creates it, so it lands
-# here, still ahead of every state, metadata, hook, and temp artifact. An
-# operator who needs a pre-window refusal declares the worktree pool root itself
-# (docs/configuration.md "No-go paths").
+# here, still ahead of every state, metadata, hook, and temp artifact. The
+# refusal is not a partial one: the EXIT trap unwinds the worktree and the window
+# this invocation just created, so a refusal here leaves nothing behind either.
+# An operator who needs a refusal before a window is ever opened declares the
+# worktree pool root itself (docs/configuration.md "No-go paths").
 if [ "$KIND" != secondmate ]; then
   fm_no_go_assert "task worktree" "$WT" "$CONFIG" || exit 1
 fi
@@ -1757,6 +1872,10 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The task owns its worktree and window from here: meta records both, so teardown
+# is the one thing entitled to remove them.
+SPAWN_WORKTREE_ABORT_CLEANUP=0
+SPAWN_WINDOW_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

@@ -7,6 +7,10 @@
 # prefix per line. The operator's actual paths are private, so nothing tracked
 # ever names them; only this mechanism ships. An ABSENT file means no
 # restriction, which is what keeps every existing dispatch byte-identical.
+# Absent is the ONLY unrestricted state: a path that exists in any other form -
+# a directory, a dangling symlink, an unreadable file - is a boundary the
+# operator declared and this library cannot read, so it refuses rather than
+# silently reading it as "no restriction".
 #
 # Matching is on a path-component boundary, never a raw string prefix, so /a/b
 # blocks /a/b and /a/b/c but never /a/bc. Both the literal and the physically
@@ -87,12 +91,41 @@ fm_no_go_is_under() {  # <path> <prefix>
   return 1
 }
 
+# 0 when <path> exists and is a readable regular file, 1 when it is absent in
+# every form, 2 with the reason on stderr when it exists but cannot be read as
+# the declared prefix list.
+fm_no_go_config_readable() {  # <path>
+  local file=$1 reason
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  if [ -L "$file" ] && [ ! -e "$file" ]; then
+    reason="is a dangling symlink"
+  elif [ -d "$file" ]; then
+    reason="is a directory"
+  elif [ ! -f "$file" ]; then
+    reason="is not a regular file"
+  elif [ ! -r "$file" ]; then
+    reason="is not readable"
+  else
+    return 0
+  fi
+  echo "error: $file $reason, so the declared no-go paths cannot be read; refusing to dispatch" >&2
+  return 2
+}
+
 # Echo one normalised prefix per line. 0 with no output means unrestricted (the
-# file is absent or holds only comments); 2 means malformed, already reported.
+# file is absent or holds only comments); 2 means malformed or unreadable,
+# already reported.
 fm_no_go_prefixes() {  # <config-dir>
-  local file line trimmed prefix lineno=0
+  local file line trimmed prefix lineno=0 readable=0
   file=$(fm_no_go_config_path "$1")
-  [ -f "$file" ] || return 0
+  fm_no_go_config_readable "$file" || readable=$?
+  case "$readable" in
+    0) ;;
+    1) return 0 ;;
+    *) return 2 ;;
+  esac
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     trimmed=$(fm_no_go_trim "$line")
@@ -145,13 +178,14 @@ EOF
 # 0 when <path> may be used, 1 with the refusal on stderr when it may not. <label>
 # names the path in the operator's terms, e.g. "project directory".
 fm_no_go_assert() {  # <label> <path> <config-dir>
-  local label=$1 path=$2 dir=$3 status
-  if fm_no_go_match "$path" "$dir" >/dev/null; then
-    echo "error: $label '$path' is inside the no-go path '$FM_NO_GO_MATCH' declared in config/$FM_NO_GO_FILE; refusing to dispatch there" >&2
-    return 1
-  else
-    status=$?
-  fi
-  [ "$status" -eq 1 ] || return 1
-  return 0
+  local label=$1 path=$2 dir=$3 status=0
+  fm_no_go_match "$path" "$dir" >/dev/null || status=$?
+  case "$status" in
+    0)
+      echo "error: $label '$path' is inside the no-go path '$FM_NO_GO_MATCH' declared in config/$FM_NO_GO_FILE; refusing to dispatch there" >&2
+      return 1
+      ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
 }
