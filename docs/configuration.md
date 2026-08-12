@@ -265,6 +265,33 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## No-go paths (config/no-go-paths)
+
+`config/no-go-paths` (local, gitignored, optional) declares directories that agent work must never be dispatched into, such as personal working copies you keep for reading and tinkering.
+An absent file means no restriction, and every dispatch behaves exactly as it did without this file.
+Because the file is local, no tracked material ever names your paths; only the mechanism ships.
+
+The format is one absolute path prefix per line.
+Blank lines and lines whose first non-blank character is `#` are ignored.
+Trailing slashes are tolerated, and a leading `~` or `~/` expands to `$HOME`.
+A non-empty line that is not an absolute path after that expansion refuses the spawn as a configuration error instead of being skipped, because a silently dropped line is a protection you believed was in force.
+
+`bin/fm-spawn.sh` refuses when either the task's project directory or its final worktree resolves inside a declared prefix.
+Comparison is on canonicalised absolute paths and matches only on a path-component boundary, so `/a/b` blocks `/a/b` and `/a/b/c` but never `/a/bc`.
+A path is blocked when either its literal or its physically resolved form matches, so a symlinked alias cannot route around a prefix.
+A refusal exits non-zero and names both the offending path and the prefix that matched.
+In a batch dispatch, a refused pair is reported and skipped while the remaining pairs still launch, matching the existing batch contract.
+A `--secondmate` launch runs the same check against the resolved firstmate home.
+
+The project-directory check runs before any window, worktree, temp root, hook, state, or metadata file exists, so a refused dispatch leaves nothing behind.
+The worktree check necessarily runs later.
+No worktree provider - `treehouse get`, `sdev new`, or Orca - reveals its destination before it creates it, so that check runs as soon as the path is known: still ahead of every state, metadata, hook, and temp artifact, but after the backend window has been created.
+Declaring the worktree pool root itself in `config/no-go-paths` is what makes that case refuse before a window too.
+
+Secondmate homes inherit this file from the primary, so a secondmate's own crewmates are held to the same boundary and a secondmate cannot route around a machine-wide restriction.
+The matching logic lives in [`../bin/fm-no-go-lib.sh`](../bin/fm-no-go-lib.sh) so other scripts can adopt it without re-implementing prefix matching.
+See [`examples/no-go-paths`](examples/no-go-paths) for a copyable config.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

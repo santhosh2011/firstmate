@@ -169,6 +169,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-no-go-lib.sh
+. "$SCRIPT_DIR/fm-no-go-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -789,6 +791,10 @@ fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
+  # Declared no-go paths (bin/fm-no-go-lib.sh) refuse here, before the pre-launch
+  # fast-forward, the home's state directory, and inheritance propagation, so a
+  # refused secondmate launch mutates nothing.
+  fm_no_go_assert "secondmate home" "$PROJ_ABS" "$CONFIG" || exit 1
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
     if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
       echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
@@ -841,6 +847,11 @@ if [ "$KIND" = secondmate ]; then
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  # Declared no-go paths (bin/fm-no-go-lib.sh). This is the operator-supplied
+  # dispatch target, so refusing here is the guarantee that work never lands in
+  # an off-limits directory: nothing - no window, worktree, temp root, hook,
+  # state, or metadata - has been created yet.
+  fm_no_go_assert "project directory" "$PROJ_ABS" "$CONFIG" || exit 1
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -1413,6 +1424,17 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$IS_SDEV" != 1 ]; t
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+
+# The task's final worktree, whichever provider produced it - treehouse above,
+# `sdev new`, or Orca - against the declared no-go paths. A secondmate's worktree
+# IS its home, already checked before any mutation. This check cannot run any
+# earlier: no provider reveals its destination before it creates it, so it lands
+# here, still ahead of every state, metadata, hook, and temp artifact. An
+# operator who needs a pre-window refusal declares the worktree pool root itself
+# (docs/configuration.md "No-go paths").
+if [ "$KIND" != secondmate ]; then
+  fm_no_go_assert "task worktree" "$WT" "$CONFIG" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
