@@ -347,20 +347,26 @@ EOF
 
 # The control: identical fixture, no config file. The spawn must complete and
 # record that same worktree, proving the refusal above comes from the guard and
-# not from the fixture.
+# not from the fixture. It doubles as the disarm control for the teardown below -
+# a completed spawn owns its worktree and window, so the EXIT trap must leave
+# both alone.
 test_worktree_outside_a_no_go_path_completes() {
-  local id home proj wt fakebin out status
+  local id home proj wt fakebin out status log
   id=nogo-wtok-q8
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_worktree_case worktree-allowed "$id")
 EOF
-  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
+  log="$home/tmux.log"
+  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$log")
   status=$?
   rm -rf "/tmp/fm-$id"
   expect_code 0 "$status" "an unrestricted spawn must still complete"
   assert_not_contains "$out" "$REFUSAL" "an absent config file refused a worktree"
   assert_grep "worktree=$wt" "$home/state/$id.meta" "the completed spawn did not record its worktree"
-  pass "with no config file the same worktree spawns and is recorded as before"
+  [ -d "$wt" ] || fail "a completed spawn removed its own worktree: $out"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "a completed spawn closed its own window"
+  pass "with no config file the same worktree spawns, is recorded, and is left in place"
 }
 
 # The refusal must not stop at "do not launch": the worktree it refuses sits
@@ -390,23 +396,62 @@ EOF
   pass "a worktree refusal removes the worktree and closes the window it created"
 }
 
-# The counterpart of that unwind: a completed spawn owns its worktree, so the
-# same EXIT trap must leave it alone.
-test_completed_spawn_keeps_its_worktree_and_window() {
-  local id home proj wt fakebin out status log
-  id=nogo-wtkeep-q9
+# The other half of that unwind, and the one that matters most: the refusal must
+# NOT remove a worktree whose safety it cannot establish. An untracked file makes
+# `git status` report content, so cleanliness is disproved and the abort has to
+# warn and leave the directory - including the file - exactly where it is.
+test_refusal_leaves_an_unproven_worktree_in_place() {
+  local id home proj wt fakebin out status
+  id=nogo-wtdirty-q9
   IFS='|' read -r home proj wt fakebin <<EOF
-$(make_worktree_case worktree-kept "$id")
+$(make_worktree_case worktree-dirty "$id")
 EOF
-  log="$home/tmux.log"
-  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$log")
+  printf 'work in progress\n' > "$wt/uncommitted.txt"
+  printf '%s\n' "$(dirname "$wt")" > "$home/config/no-go-paths"
+  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
   status=$?
   rm -rf "/tmp/fm-$id"
-  expect_code 0 "$status" "an unrestricted spawn must still complete"
-  [ -d "$wt" ] || fail "a completed spawn removed its own worktree: $out"
-  grep -F "kill-window" "$log" >/dev/null \
-    && fail "a completed spawn closed its own window"
-  pass "a completed spawn keeps the worktree and window it created"
+  [ "$status" -ne 0 ] || fail "a worktree inside a no-go path must refuse: $out"
+  assert_contains "$out" "$REFUSAL" "the resolved worktree was not checked"
+  [ -d "$wt" ] || fail "the refusal removed a worktree it could not prove was clean: $out"
+  [ -f "$wt/uncommitted.txt" ] || fail "the refusal discarded uncommitted work: $out"
+  assert_contains "$out" "leaving worktree $wt in place" \
+    "the refusal did not warn that it left the worktree behind"
+  assert_contains "$out" "uncommitted or untracked changes" \
+    "the warning did not name why the worktree could not be removed"
+  pass "a refusal warns and leaves a worktree whose cleanliness it cannot establish"
+}
+
+# The same conservative branch reached through the OTHER unprovable input, and
+# the one that actually regressed: a worktree whose `git status` cannot run.
+# A corrupt index leaves `rev-parse` answering normally while `status` exits
+# non-zero with EMPTY stdout - the exact shape that a bare emptiness test reads
+# as "clean" and hands to a forced, hard-resetting return.
+test_refusal_leaves_a_worktree_whose_status_cannot_be_read() {
+  local id home proj wt fakebin out status gitdir
+  id=nogo-wtunread-q9
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_worktree_case worktree-unreadable "$id")
+EOF
+  printf '%s\n' "$(dirname "$wt")" > "$home/config/no-go-paths"
+  gitdir=$(git -C "$wt" rev-parse --absolute-git-dir) || fail "fixture worktree has no git dir"
+  printf 'not a git index\n' > "$gitdir/index"
+  git -C "$wt" status --porcelain >/dev/null 2>&1 \
+    && fail "fixture did not actually break git status"
+  [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] \
+    || fail "fixture's broken git status still prints to stdout, so it proves nothing"
+
+  out=$(run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
+  status=$?
+  rm -rf "/tmp/fm-$id"
+  [ "$status" -ne 0 ] || fail "a worktree inside a no-go path must refuse: $out"
+  assert_contains "$out" "$REFUSAL" "the resolved worktree was not checked"
+  [ -d "$wt" ] || fail "the refusal removed a worktree whose status it never read: $out"
+  assert_contains "$out" "leaving worktree $wt in place" \
+    "the refusal did not warn that it left the worktree behind"
+  assert_contains "$out" "cleanliness was never established" \
+    "the warning did not name the unreadable status as the reason"
+  pass "a refusal warns and leaves a worktree whose git status could not be read"
 }
 
 # --- a present but unusable config file fails closed -------------------------
@@ -508,7 +553,8 @@ test_assert_status_contract() {
 test_prefix_matching
 test_worktree_inside_a_no_go_path_is_refused
 test_worktree_refusal_unwinds_the_worktree_and_window
-test_completed_spawn_keeps_its_worktree_and_window
+test_refusal_leaves_an_unproven_worktree_in_place
+test_refusal_leaves_a_worktree_whose_status_cannot_be_read
 test_worktree_outside_a_no_go_path_completes
 test_unreadable_config_refuses
 test_symlinked_config_still_restricts

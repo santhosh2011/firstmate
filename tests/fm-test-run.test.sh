@@ -116,6 +116,7 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-no-go-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -158,6 +159,16 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  # The no-go library decides the fatal-boundary behavior of secondmate config
+  # inheritance, which only the secondmate family covers, so --changed must
+  # over-select it alongside the dispatch families it obviously touches.
+  printf '\n' >>"$repo/bin/fm-no-go-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" "no-go library selects backend-dispatch coverage"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "no-go library selects secondmate coverage"
+  git -C "$repo" add bin/fm-no-go-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm no-go-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

@@ -573,12 +573,38 @@ FM_CONFIG_INHERIT_LOCK_REL="state/.fm-inherited-config.lock"
 # an enforcement claim, and never a parsed summary of file contents.
 FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and apply their exact contents at every future intake. They are defaults/rules and do not remove your judgment to choose differently when warranted.'
 
+# Inherited items that must NEVER be inlined into an agent-visible reread
+# instruction, even though they propagate like every other item. Inheritance and
+# agent notification are separate concerns, and this is the set where they part.
+#
+# config/no-go-paths is here for two reasons. Its bytes are the operator's
+# private absolute paths, and keeping them out of tracked material is the whole
+# point of the file, so streaming them verbatim into a per-home instruction
+# undoes that. And it is a mechanically enforced refusal boundary
+# (bin/fm-no-go-lib.sh, applied by bin/fm-spawn.sh at dispatch time), not a
+# default, so FM_CONFIG_REREAD_FRAMING below - which tells the agent these are
+# rules it may still choose differently about - states the opposite of the
+# contract. No agent needs to read this file; the guard refuses without it.
+FM_CONFIG_REREAD_EXCLUDED="$FM_NO_GO_FILE"
+
+fm_config_reread_is_excluded_item() {
+  local item=$1 candidate
+  for candidate in $FM_CONFIG_REREAD_EXCLUDED; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
 # fm_config_reread_is_allowlisted_item <item>
-# True only for the declared inheritable config allowlist (bare item name as
-# recorded in FM_CONFIG_INHERIT_REPORT). data/captain-shared.md is never
-# allowlisted here and must never be inlined into a reread instruction.
+# True only for a declared inheritable config item (bare item name as recorded in
+# FM_CONFIG_INHERIT_REPORT) that is not in FM_CONFIG_REREAD_EXCLUDED.
+# data/captain-shared.md is never allowlisted here and must never be inlined into
+# a reread instruction.
 fm_config_reread_is_allowlisted_item() {
   local item=$1 candidate
+  if fm_config_reread_is_excluded_item "$item"; then
+    return 1
+  fi
   for candidate in $FM_INHERITABLE_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
@@ -588,10 +614,13 @@ fm_config_reread_is_allowlisted_item() {
 # fm_config_reread_changed_items <report>
 # Print bare allowlisted config item names whose report status is "pushed",
 # in FM_INHERITABLE_CONFIG order (deterministic path order). Empty when none.
+# An excluded item that changed is not a reread candidate at all, so a push that
+# only touched one is silent rather than a nudge with nothing to say.
 fm_config_reread_changed_items() {
   local report=$1 item status
   [ -n "$report" ] && [ -f "$report" ] || return 0
   for item in $FM_INHERITABLE_CONFIG; do
+    fm_config_reread_is_allowlisted_item "$item" || continue
     status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || status=""
     [ "$status" = pushed ] || continue
     printf '%s\n' "$item"

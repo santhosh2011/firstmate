@@ -286,6 +286,13 @@ SPAWN_WINDOW_ABORT_CLEANUP=0
 SPAWN_WINDOW_ABORT_BACKEND=
 SPAWN_WINDOW_ABORT_TARGET=
 SPAWN_WINDOW_ABORT_TAB=
+# Provenance for the SDev branch of that teardown: set only when THIS invocation's
+# own `sdev new` succeeded, alongside the workspace path that call resolved to.
+SPAWN_SDEV_CREATED=0
+SPAWN_SDEV_CREATED_PATH=
+# Why the last safety probe refused, so the warning names the reason rather than
+# a generic "cannot prove".
+SPAWN_ABORT_UNSAFE_REASON=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -304,17 +311,45 @@ parse_orca_worktree_result() {
   fi
 }
 
-# A directory that is its own git worktree root and has nothing uncommitted.
-# Anything else - a missing dir, a nested path, a dirty tree, an unreadable repo -
-# is something this abort must not touch.
+# A directory that is its own git worktree root and is PROVABLY clean. Clean is
+# exactly "git status exited zero AND printed nothing": a status that could not
+# run says nothing about the tree, and reading its empty stdout as cleanliness
+# would hand an unexamined worktree to a forced return. Every other outcome - a
+# missing dir, a nested path, a dirty tree, an unreadable repo - refuses too, and
+# records why in SPAWN_ABORT_UNSAFE_REASON.
 spawn_abort_worktree_root_is_clean() {  # <dir>
-  local dir=$1 dir_real top
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
-  dir_real=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || return 1
-  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
-  top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
-  [ "$top" = "$dir_real" ] || return 1
-  [ -z "$(git -C "$dir" status --porcelain 2>/dev/null)" ]
+  local dir=$1 dir_real top out status=0
+  SPAWN_ABORT_UNSAFE_REASON=
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' is not an existing directory"
+    return 1
+  fi
+  if ! dir_real=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P); then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' could not be resolved"
+    return 1
+  fi
+  if ! top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null); then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' is not inside a readable git worktree"
+    return 1
+  fi
+  if ! top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P); then
+    SPAWN_ABORT_UNSAFE_REASON="the git worktree root of '$dir' could not be resolved"
+    return 1
+  fi
+  if [ "$top" != "$dir_real" ]; then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' is not its own git worktree root"
+    return 1
+  fi
+  out=$(git -C "$dir" status --porcelain 2>/dev/null) || status=$?
+  if [ "$status" -ne 0 ]; then
+    SPAWN_ABORT_UNSAFE_REASON="git status in '$dir' exited $status, so its cleanliness was never established"
+    return 1
+  fi
+  if [ -n "$out" ]; then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' has uncommitted or untracked changes"
+    return 1
+  fi
+  return 0
 }
 
 # Additionally: the worktree must be a linked worktree of THIS spawn's project,
@@ -322,16 +357,34 @@ spawn_abort_worktree_root_is_clean() {  # <dir>
 spawn_abort_treehouse_worktree_is_removable() {  # <dir>
   local dir=$1 common proj_common
   spawn_abort_worktree_root_is_clean "$dir" || return 1
-  common=$(CDPATH='' cd -- "$dir" 2>/dev/null \
-    && cd -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
-  proj_common=$(CDPATH='' cd -- "$PROJ_ABS" 2>/dev/null \
-    && cd -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
-  [ "$common" = "$proj_common" ]
+  if ! common=$(CDPATH='' cd -- "$dir" 2>/dev/null \
+    && cd -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P); then
+    SPAWN_ABORT_UNSAFE_REASON="the git directory of '$dir' could not be resolved"
+    return 1
+  fi
+  if ! proj_common=$(CDPATH='' cd -- "$PROJ_ABS" 2>/dev/null \
+    && cd -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P); then
+    SPAWN_ABORT_UNSAFE_REASON="the git directory of '$PROJ_ABS' could not be resolved"
+    return 1
+  fi
+  if [ "$common" != "$proj_common" ]; then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' is not a linked worktree of '$PROJ_ABS'"
+    return 1
+  fi
+  return 0
 }
 
 spawn_abort_sdev_workspace_is_removable() {  # <dir>
   local dir=$1 rp
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  SPAWN_ABORT_UNSAFE_REASON=
+  if [ "$SPAWN_SDEV_CREATED" != 1 ] || [ "$dir" != "$SPAWN_SDEV_CREATED_PATH" ]; then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' is not the workspace this invocation's own \`sdev new\` created"
+    return 1
+  fi
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    SPAWN_ABORT_UNSAFE_REASON="'$dir' is not an existing directory"
+    return 1
+  fi
   while IFS= read -r rp; do
     [ -n "$rp" ] || continue
     spawn_abort_worktree_root_is_clean "$dir/$rp" || return 1
@@ -344,31 +397,35 @@ EOF
 # warns and leaves the directory alone: an aborted spawn that cannot prove what
 # it is deleting must not delete it.
 spawn_abort_remove_task_worktree() {
-  local dir=$SPAWN_WORKTREE_ABORT_PATH
+  local dir=$SPAWN_WORKTREE_ABORT_PATH out
   case "$SPAWN_WORKTREE_ABORT_PROVIDER" in
     treehouse)
       if ! spawn_abort_treehouse_worktree_is_removable "$dir"; then
-        echo "warning: leaving worktree $dir in place: it is not a clean worktree of $PROJ_ABS, so this aborted spawn cannot prove it is safe to remove" >&2
+        echo "warning: leaving worktree $dir in place: $SPAWN_ABORT_UNSAFE_REASON" >&2
         return 0
       fi
       if ! command -v treehouse >/dev/null 2>&1; then
         echo "warning: treehouse is unavailable, so worktree $dir created by this aborted spawn is still in place; return it manually" >&2
         return 0
       fi
-      ( CDPATH='' cd -- "$PROJ_ABS" && treehouse return --force "$dir" ) >/dev/null 2>&1 \
-        || echo "warning: could not return worktree $dir created by this aborted spawn; return it manually" >&2
+      out=$( ( CDPATH='' cd -- "$PROJ_ABS" && treehouse return --force "$dir" ) 2>&1 ) \
+        || echo "warning: could not return worktree $dir created by this aborted spawn; return it manually${out:+: $(first_line "$out")}" >&2
       ;;
     sdev)
       if ! spawn_abort_sdev_workspace_is_removable "$dir"; then
-        echo "warning: leaving SDev workspace $dir in place: at least one of its repos is not a clean worktree root, so this aborted spawn cannot prove it is safe to archive" >&2
+        echo "warning: leaving SDev workspace $dir in place: $SPAWN_ABORT_UNSAFE_REASON" >&2
         return 0
       fi
       if ! command -v sdev >/dev/null 2>&1; then
-        echo "warning: sdev is unavailable, so workspace $dir created by this aborted spawn is still in place; archive it manually" >&2
+        echo "warning: sdev is unavailable, so workspace $dir created by this aborted spawn is still in place; remove it manually" >&2
         return 0
       fi
-      SDEV_HOME="${SDEV_HOME_DIR:-}" sdev -p "${SDEV_PROJ:-}" end "${SDEV_SLUG:-}" >/dev/null 2>&1 \
-        || echo "warning: could not archive SDev workspace $dir created by this aborted spawn; archive it manually" >&2
+      # `sdev end` archives; only `sdev destroy` actually removes the worktrees,
+      # offset, and ledger entry, which is what a refusal inside a declared no-go
+      # path needs. Safe here and only here: this workspace is provably the one
+      # this invocation created moments ago and every repo in it is clean.
+      out=$(SDEV_HOME="${SDEV_HOME_DIR:-}" sdev -p "${SDEV_PROJ:-}" destroy "${SDEV_SLUG:-}" --force 2>&1) \
+        || echo "warning: could not remove SDev workspace $dir created by this aborted spawn; remove it manually${out:+: $(first_line "$out")}" >&2
       ;;
   esac
 }
@@ -1426,8 +1483,10 @@ sdev_wait_pane_in_workspace() {  # ensure the cd landed before launch, like tree
 }
 spawn_sdev_workspace() {  # create the workspace and place the crewmate in it
   sdev -p "$SDEV_PROJ" new "$SDEV_SLUG" >/dev/null 2>&1 || { echo "error: sdev new $SDEV_SLUG failed for project $SDEV_PROJ; inspect window $T" >&2; exit 1; }
+  SPAWN_SDEV_CREATED=1
   WT=$(sdev -p "$SDEV_PROJ" cd "$SDEV_SLUG" 2>/dev/null) || WT=
   [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: sdev workspace dir not resolved for $SDEV_SLUG" >&2; exit 1; }
+  SPAWN_SDEV_CREATED_PATH=$WT
   validate_spawn_sdev_workspace
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
   sdev_wait_pane_in_workspace

@@ -669,6 +669,10 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*|bin/fm-no-go-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # Every script here also drives a secondmate launch, and the no-go library
+      # in particular decides the fatal-boundary behavior that only the
+      # secondmate family covers.
+      printf '%s\n' secondmate
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings

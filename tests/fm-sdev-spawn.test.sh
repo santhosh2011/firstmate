@@ -55,6 +55,16 @@ case "$cmd" in
     ;;
   cd) printf '%s\n' "$ws" ;;
   up) : > "$ws/.fake-up" ;;
+  destroy)
+    # The removing verb: drop each per-repo worktree from its source repo and
+    # take the workspace dir with it. `end` archives instead, and this fake keeps
+    # that distinction so a test can tell the two apart by real git state.
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      git -C "$home/core/$proj/$p" worktree remove --force "$ws/$p" >/dev/null 2>&1 || true
+    done < <(yq -r '.repos | to_entries | .[] | .value.path' "$reg")
+    rm -rf "$ws"
+    ;;
   *) exit 0 ;;
 esac
 exit 0
@@ -212,7 +222,40 @@ test_non_sdev_project_uses_treehouse_unchanged() {
   pass "fm-spawn leaves the treehouse path unchanged for a non-SDev project"
 }
 
+# A no-go refusal on the SDev path must leave nothing inside the operator's
+# off-limits directory, which for this provider means REMOVING the workspace, not
+# archiving it: an archive under SDEV_HOME would still sit inside the declared
+# prefix. Removal is asserted against real git state - the workspace dir is gone
+# and each source repo no longer lists its per-repo worktree.
+test_sdev_workspace_inside_a_no_go_path_is_refused_and_removed() {
+  local parts case_dir home sdev fakebin id ws p code
+  parts=$(setup_case nogo scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-nogo
+  ws="$sdev/projects/scdi/$id"
+  printf '%s\n' "$sdev/projects" > "$home/config/no-go-paths"
+  set +e
+  FM_FAKE_PANE_PATH="$ws" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
+  code=$?
+  set -e
+  rm -rf "/tmp/fm-$id"
+
+  [ "$code" -ne 0 ] || fail "no-go: an SDev workspace inside a declared prefix must refuse"
+  assert_grep "is inside the no-go path" "$case_dir/err" "no-go: the workspace was not checked"
+  [ ! -d "$ws" ] || fail "no-go: the refusal left the SDev workspace inside the off-limits directory"
+  for p in multi_api_src multi_ui_src common; do
+    git -C "$sdev/core/scdi/$p" worktree list --porcelain 2>/dev/null | grep -Fq "$ws/$p" \
+      && fail "no-go: $p's worktree is still registered after the refusal"
+  done
+  assert_present "$home/state" "no-go: the home state dir should still exist"
+  [ ! -e "$home/state/$id.meta" ] || fail "no-go: a refused SDev spawn wrote task metadata"
+  [ ! -s "$case_dir/launch.log" ] || fail "no-go: a refused SDev spawn launched a crewmate"
+  pass "an SDev workspace inside a no-go path is refused and removed, not archived"
+}
+
 test_sdev_backed_takes_sdev_path
 test_sdev_workspace_repos_are_isolated_worktrees
 test_sdev_isolation_failure_aborts
+test_sdev_workspace_inside_a_no_go_path_is_refused_and_removed
 test_non_sdev_project_uses_treehouse_unchanged

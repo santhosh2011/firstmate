@@ -288,11 +288,14 @@ The project-directory check runs before any window, worktree, temp root, hook, s
 The worktree check necessarily runs later.
 No worktree provider - `treehouse get`, `sdev new`, or Orca - reveals its destination before it creates it, so that check runs as soon as the path is known: still ahead of every state, metadata, hook, and temp artifact, but after the backend window has been created.
 That refusal then removes the worktree and closes the window this dispatch itself created, so a refusal at either point leaves nothing behind.
-Removal is deliberately conservative: it only unwinds a clean worktree this dispatch created, and if it cannot prove that, it warns and names the directory instead of deleting anything uncertain.
+Each provider is unwound with its own removing verb: a treehouse worktree goes back to its pool with `treehouse return --force`, and an SDev workspace is removed outright with `sdev destroy --force`, which deletes the per-repo worktrees, the port offset, and the ledger entry rather than archiving them.
+Removal is deliberately conservative and only ever unwinds what this dispatch itself created: the SDev branch acts only on the workspace this invocation's own `sdev new` produced, and every checkout must be provably clean, meaning `git status` both succeeded and reported nothing.
+Any probe that cannot establish that - an unreadable repository, a `git status` that fails, a path this dispatch did not create - makes the refusal warn and name the directory and the reason instead of deleting anything uncertain.
 Declaring the worktree pool root itself in `config/no-go-paths` is what makes that case refuse before a window is ever opened.
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates are held to the same boundary and a secondmate cannot route around a machine-wide restriction.
 That inheritance is enforced, not best-effort: when the primary has a `config/no-go-paths` and it cannot be written into the secondmate home, the launch is refused instead of starting a home whose crewmates would see no restriction.
+Unlike every other inherited config item, this one is never inlined into the config-reread instruction sent to a live secondmate agent: its bytes are your private paths, and it is a mechanical refusal at dispatch time rather than a default an agent weighs, so no agent is ever shown it.
 The matching logic lives in [`../bin/fm-no-go-lib.sh`](../bin/fm-no-go-lib.sh) so other scripts can adopt it without re-implementing prefix matching.
 See [`examples/no-go-paths`](examples/no-go-paths) for a copyable config.
 

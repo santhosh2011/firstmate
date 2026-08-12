@@ -1203,6 +1203,54 @@ reread_pending_path() {
   printf '%s.pending\n' "$(reread_instruction_path "$1")"
 }
 
+# config/no-go-paths inherits like every other item but must never reach an agent.
+# Its bytes are the operator's private absolute paths, and it is a mechanical
+# refusal at dispatch time rather than a default the agent weighs, so the reread
+# framing would state the opposite of its contract. The exclusion is pinned here
+# so a future FM_INHERITABLE_CONFIG addition cannot silently re-enrol it.
+test_boundary_file_inherits_but_is_never_inlined_into_a_reread() {
+  local w head status instruction secret
+  w=$(new_world boundary-no-reread)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  secret='/Users/private/off-limits-marker-9c2f'
+
+  fm_config_reread_is_allowlisted_item no-go-paths \
+    && fail "boundary reread: the boundary file is allowlisted for the agent-visible reread"
+  fm_config_reread_is_allowlisted_item crew-harness \
+    || fail "boundary reread: the exclusion swallowed an ordinary inherited item"
+
+  # A push that changes ONLY the boundary file must still propagate it and must
+  # send nothing at all: there is no allowlisted change to tell the agent about.
+  printf '%s\n' "$secret" > "$w/home/config/no-go-paths"
+  run_config_push "$w" >/dev/null 2>"$w/boundary.err"; status=$?
+  expect_code 0 "$status" "boundary reread: a boundary-only push should succeed"
+  [ "$(cat "$w/sm/config/no-go-paths" 2>/dev/null)" = "$secret" ] \
+    || fail "boundary reread: the boundary file did not propagate"
+  reread_instruction_path "$w/sm" >/dev/null 2>&1 \
+    && fail "boundary reread: a boundary-only push wrote an agent-visible instruction"
+
+  # And when an ordinary item does change alongside it, the instruction that gets
+  # written must carry the ordinary item and none of the boundary bytes.
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf '%s\n%s/second\n' "$secret" "$secret" > "$w/home/config/no-go-paths"
+  run_config_push "$w" >/dev/null 2>>"$w/boundary.err"; status=$?
+  expect_code 0 "$status" "boundary reread: a mixed push should succeed"
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "boundary reread: the ordinary item did not propagate"
+  grep -Fq "$secret/second" "$w/sm/config/no-go-paths" \
+    || fail "boundary reread: the changed boundary file did not converge downstream"
+  instruction=$(reread_instruction_path "$w/sm") \
+    || fail "boundary reread: no instruction was written for the changed ordinary item"
+  assert_contains "$(cat "$instruction")" 'config/crew-harness' \
+    "boundary reread: the instruction lost its ordinary item"
+  grep -Fq "$secret" "$instruction" \
+    && fail "boundary reread: the instruction inlined the operator's private no-go paths"
+  assert_not_contains "$(cat "$instruction")" 'config/no-go-paths' \
+    "boundary reread: the instruction still names the boundary file"
+  pass "B27 the boundary file inherits into every home but is never inlined into an agent reread"
+}
+
 reread_retry_stage_path() {
   local home=$1 id=$2 retry_dir path latest=
   retry_dir="$home/state/.fm-inherited-config-reread-retry/$id"
@@ -2525,6 +2573,7 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_boundary_file_inherits_but_is_never_inlined_into_a_reread
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge
