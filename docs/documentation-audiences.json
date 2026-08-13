@@ -240,6 +240,14 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/landing-policy.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/no-go-paths",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
@@ -265,6 +273,10 @@
     },
     {
       "path": "docs/scripts.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/sdev-backend.md",
       "audience": "operator-current"
     },
     {

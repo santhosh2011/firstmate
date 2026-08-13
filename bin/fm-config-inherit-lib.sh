@@ -7,9 +7,11 @@
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
-# bounds that home's startup-memory curation, and primary
+# bounds that home's startup-memory curation, primary
 # config/herdr-presentation-spaces enables the same default-off Herdr presentation
-# projection). It also pushes the one primary-authoritative shared
+# projection, and primary config/no-go-paths holds that home's own crewmates to
+# the same off-limits directories so a secondmate cannot route around a
+# machine-wide boundary). It also pushes the one primary-authoritative shared
 # captain-preference file, data/captain-shared.md, into each secondmate home's
 # data/ as a read-only copy.
 #
@@ -36,6 +38,23 @@
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-no-go-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-no-go-lib.sh"
+# shellcheck source=bin/fm-path-state-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-path-state-lib.sh"
+
+# Set to 1 by propagate_inheritable_config when the primary HAS a no-go boundary
+# file and this run could not put it in the destination home. Every other item is
+# advisory configuration and stays a warning; this one is a safety boundary, so a
+# caller that is about to launch that home must treat it as fatal rather than
+# running a home whose crewmates would see no restriction at all. A primary with
+# NO boundary file is the unrestricted default and never sets this. Read it
+# through fm_config_inherit_boundary_failed rather than the variable.
+FM_CONFIG_INHERIT_BOUNDARY_FAILED=0
+
+fm_config_inherit_boundary_failed() {
+  [ "$FM_CONFIG_INHERIT_BOUNDARY_FAILED" = 1 ]
+}
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -46,7 +65,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget no-go-paths}"
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -106,6 +125,40 @@ copy_inheritable_file() {
   return 1
 }
 
+# Classify one inheritable source item: 0 when it is a readable regular file, 1
+# when it is PROVABLY absent, 2 with a reason on stdout when it exists but cannot
+# be read as one - a directory, a dangling symlink, a symlink to a directory, an
+# unreadable file - or when its state could not be established at all.
+#
+# The distinction is load-bearing. Neither "not a readable regular file" nor "I
+# could not look" is "the primary has no value": mirroring either as absence
+# would delete the destination's inherited copy on the strength of a source
+# nobody read, which for config/no-go-paths means deleting the very boundary the
+# operator declared. Only fm_path_state's provable absence may mirror.
+inheritable_source_state() {  # <src>
+  local src=$1 state=0
+  fm_path_state "$src" || state=$?
+  if [ "$state" -eq "$FM_PATH_STATE_ABSENT" ]; then
+    return 1
+  fi
+  if [ "$state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+    printf '%s' "undeterminable primary source ($FM_PATH_STATE_REASON)"
+    return 2
+  fi
+  if [ -L "$src" ] && [ ! -e "$src" ]; then
+    printf '%s' "unusable primary source (dangling symlink)"
+  elif [ -d "$src" ]; then
+    printf '%s' "unusable primary source (directory)"
+  elif [ ! -f "$src" ]; then
+    printf '%s' "unusable primary source (not a regular file)"
+  elif [ ! -r "$src" ]; then
+    printf '%s' "unusable primary source (not readable)"
+  else
+    return 0
+  fi
+  return 2
+}
+
 destination_allows_inherited_item() {
   local dest_config=$1 item=$2 dest_parent dest_name dest_parent_abs top dest_path rel_path
   dest_parent=${dest_config%/*}
@@ -130,9 +183,11 @@ destination_allows_inherited_item() {
 # so this writes nothing there. It emits concise stderr diagnostics only for
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
-# churns mtimes). A source item that is absent is mirrored as a missing
+# churns mtimes). A source item that is genuinely ABSENT is mirrored as a missing
 # destination item, so clearing the primary's value clears it downstream too
-# (primary-authoritative). The destination dir is created lazily, only when there
+# (primary-authoritative). A source item that exists but is not a readable
+# regular file is an error, never absence: the destination copy is left exactly
+# as it was rather than removed on the strength of a broken source. The destination dir is created lazily, only when there
 # is actually something to write, so a primary with no inherited config item set is a
 # complete no-op (it leaves the secondmate home exactly as it was - the
 # backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
@@ -140,7 +195,11 @@ destination_allows_inherited_item() {
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
 # do not affect the exit code. Returns non-zero only when a real propagation
-# error, such as copy or remove failure, occurs.
+# error, such as copy or remove failure, occurs. The one exception is the no-go
+# boundary file: when the primary HAS one and it could not be written to the
+# destination, that is an error rather than a warning, and it additionally sets
+# FM_CONFIG_INHERIT_BOUNDARY_FAILED so a caller about to launch that home can
+# refuse instead of running it unrestricted.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
   [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0
@@ -267,7 +326,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc src_state dest_state
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -276,7 +335,20 @@ propagate_shared_captain_preferences() {
   dest_home=${dest_data%/data}
   rc=0
 
-  if [ -e "$src" ] || [ -L "$src" ]; then
+  # Absence here quarantines and removes the destination copy, so it has to be
+  # provable. An unsearchable primary data/ is a lookup that never happened, not
+  # a primary without a value, and reading it as one would displace every live
+  # secondmate's shared file while reporting success.
+  src_state=0
+  fm_path_state "$src" || src_state=$?
+  if [ "$src_state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+    reason="undeterminable primary source ($FM_PATH_STATE_REASON)"
+    warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
+    record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+    return 1
+  fi
+
+  if [ "$src_state" -eq "$FM_PATH_STATE_EXISTS" ]; then
     if ! shared_captain_file_safe_existing "$src"; then
       reason="unsafe primary source"
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
@@ -352,32 +424,44 @@ propagate_shared_captain_preferences() {
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       rc=1
     fi
-  elif [ -e "$dest" ] || [ -L "$dest" ]; then
-    if ! shared_captain_file_safe_existing "$dest"; then
-      reason="unsafe destination"
-      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-      return 1
-    fi
-    if ! shared_captain_dir_safe "$dest_parent"; then
-      reason="unsafe destination directory"
-      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest_parent" "$reason"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-      restore_shared_captain_readonly "$dest" || true
-      return 1
-    fi
-    if quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
-      printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "mirrored primary absence after quarantining local copy at $quarantine"
-    else
-      reason="failed to quarantine destination before mirroring primary absence"
-      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
-      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-      restore_shared_captain_readonly "$dest" || true
-      rc=1
-    fi
   else
-    record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" unchanged ""
+    # The primary is provably without a value, so what happens next turns on the
+    # destination alone: quarantine and remove it, or record that there was
+    # nothing to converge. Neither answer may rest on a lookup that failed.
+    dest_state=0
+    fm_path_state "$dest" || dest_state=$?
+    if [ "$dest_state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+      reason="undeterminable destination ($FM_PATH_STATE_REASON)"
+      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+      return 1
+    elif [ "$dest_state" -eq "$FM_PATH_STATE_EXISTS" ]; then
+      if ! shared_captain_file_safe_existing "$dest"; then
+        reason="unsafe destination"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        return 1
+      fi
+      if ! shared_captain_dir_safe "$dest_parent"; then
+        reason="unsafe destination directory"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest_parent" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        restore_shared_captain_readonly "$dest" || true
+        return 1
+      fi
+      if quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
+        printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "mirrored primary absence after quarantining local copy at $quarantine"
+      else
+        reason="failed to quarantine destination before mirroring primary absence"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        restore_shared_captain_readonly "$dest" || true
+        rc=1
+      fi
+    else
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" unchanged ""
+    fi
   fi
   return "$rc"
 }
@@ -395,7 +479,8 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest reason rc src_state src_reason dest_state
+  FM_CONFIG_INHERIT_BOUNDARY_FAILED=0
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -446,11 +531,26 @@ propagate_inheritable_config() {
         fi
       fi
     fi
-    if [ -f "$src" ]; then
+    src_state=0
+    src_reason=$(inheritable_source_state "$src") || src_state=$?
+    if [ "$src_state" = 2 ]; then
+      warn_inheritable_config_error "$item" "$src" "$src_reason"
+      record_inheritable_config_result "$item" error "$src_reason"
+      if [ "$item" = "$FM_NO_GO_FILE" ]; then
+        FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+      fi
+      rc=1
+      continue
+    fi
+    if [ "$src_state" = 0 ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
+        if [ "$item" = "$FM_NO_GO_FILE" ]; then
+          FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+          rc=1
+        fi
         continue
       fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
@@ -460,19 +560,40 @@ propagate_inheritable_config() {
           reason="failed to copy"
           warn_inheritable_config_error "$item" "$dest" "$reason"
           record_inheritable_config_result "$item" error "$reason"
+          if [ "$item" = "$FM_NO_GO_FILE" ]; then
+            FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+          fi
           rc=1
         fi
       else
         record_inheritable_config_result "$item" unchanged ""
       fi
-    elif [ -e "$dest" ] || [ -L "$dest" ]; then
+    else
+      dest_state=0
+      fm_path_state "$dest" || dest_state=$?
+      if [ "$dest_state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
+        reason="undeterminable destination ($FM_PATH_STATE_REASON)"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        if [ "$item" = "$FM_NO_GO_FILE" ]; then
+          FM_CONFIG_INHERIT_BOUNDARY_FAILED=1
+        fi
+        rc=1
+        continue
+      fi
+      if [ "$dest_state" -eq "$FM_PATH_STATE_ABSENT" ]; then
+        record_inheritable_config_result "$item" unchanged ""
+        continue
+      fi
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
-      # Primary has no value for this item: mirror the absence downstream.
+      # Primary is PROVABLY without a value for this item: mirror the absence
+      # downstream. Only that one state reaches here - never an unusable source,
+      # never one nobody could read.
       if rm -f "$dest" 2>/dev/null; then
         record_inheritable_config_result "$item" pushed "mirrored primary absence"
       else
@@ -481,8 +602,6 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" error "$reason"
         rc=1
       fi
-    else
-      record_inheritable_config_result "$item" unchanged ""
     fi
   done
   return "$rc"
@@ -502,12 +621,38 @@ FM_CONFIG_INHERIT_LOCK_REL="state/.fm-inherited-config.lock"
 # an enforcement claim, and never a parsed summary of file contents.
 FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and apply their exact contents at every future intake. They are defaults/rules and do not remove your judgment to choose differently when warranted.'
 
+# Inherited items that must NEVER be inlined into an agent-visible reread
+# instruction, even though they propagate like every other item. Inheritance and
+# agent notification are separate concerns, and this is the set where they part.
+#
+# config/no-go-paths is here for two reasons. Its bytes are the operator's
+# private absolute paths, and keeping them out of tracked material is the whole
+# point of the file, so streaming them verbatim into a per-home instruction
+# undoes that. And it is a mechanically enforced refusal boundary
+# (bin/fm-no-go-lib.sh, applied by bin/fm-spawn.sh at dispatch time), not a
+# default, so FM_CONFIG_REREAD_FRAMING below - which tells the agent these are
+# rules it may still choose differently about - states the opposite of the
+# contract. No agent needs to read this file; the guard refuses without it.
+FM_CONFIG_REREAD_EXCLUDED="$FM_NO_GO_FILE"
+
+fm_config_reread_is_excluded_item() {
+  local item=$1 candidate
+  for candidate in $FM_CONFIG_REREAD_EXCLUDED; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
 # fm_config_reread_is_allowlisted_item <item>
-# True only for the declared inheritable config allowlist (bare item name as
-# recorded in FM_CONFIG_INHERIT_REPORT). data/captain-shared.md is never
-# allowlisted here and must never be inlined into a reread instruction.
+# True only for a declared inheritable config item (bare item name as recorded in
+# FM_CONFIG_INHERIT_REPORT) that is not in FM_CONFIG_REREAD_EXCLUDED.
+# data/captain-shared.md is never allowlisted here and must never be inlined into
+# a reread instruction.
 fm_config_reread_is_allowlisted_item() {
   local item=$1 candidate
+  if fm_config_reread_is_excluded_item "$item"; then
+    return 1
+  fi
   for candidate in $FM_INHERITABLE_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
@@ -517,10 +662,13 @@ fm_config_reread_is_allowlisted_item() {
 # fm_config_reread_changed_items <report>
 # Print bare allowlisted config item names whose report status is "pushed",
 # in FM_INHERITABLE_CONFIG order (deterministic path order). Empty when none.
+# An excluded item that changed is not a reread candidate at all, so a push that
+# only touched one is silent rather than a nudge with nothing to say.
 fm_config_reread_changed_items() {
   local report=$1 item status
   [ -n "$report" ] && [ -f "$report" ] || return 0
   for item in $FM_INHERITABLE_CONFIG; do
+    fm_config_reread_is_allowlisted_item "$item" || continue
     status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || status=""
     [ "$status" = pushed ] || continue
     printf '%s\n' "$item"

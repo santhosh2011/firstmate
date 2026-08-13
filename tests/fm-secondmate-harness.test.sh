@@ -14,11 +14,12 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend, config/herdr-presentation-spaces, and
-#      config/startup-memory-budget -
+#      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
+#      config/startup-memory-budget, and config/no-go-paths -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, runtime-backend default, and Herdr
-#      presentation opt-in inherit the primary's settings. It is primary-authoritative
+#      dispatch profiles, backlog backend, runtime-backend default, Herdr
+#      presentation opt-in, and off-limits directories inherit the primary's
+#      settings. It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
@@ -266,6 +267,7 @@ test_propagate_lib() {
   printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
   : > "$src/herdr-presentation-spaces"
+  printf '/off/limits\n' > "$src/no-go-paths"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -276,6 +278,9 @@ test_propagate_lib() {
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
+  # A secondmate's own crewmates must be held to the primary's off-limits
+  # directories, so this file cannot be left behind by inheritance.
+  [ "$(cat "$dest/no-go-paths")" = /off/limits ] || fail "no-go-paths not propagated"
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
@@ -296,7 +301,10 @@ test_propagate_lib() {
   printf 'claude\n' > "$src/crew-harness"
   printf 'tasks-axi\n' > "$src/backlog-backend"
   printf 'zellij\n' > "$src/backend"
+  printf '/off/limits\n/second/limit\n' > "$src/no-go-paths"
   propagate_inheritable_config "$src" "$dest"
+  [ "$(cat "$dest/no-go-paths")" = '/off/limits
+/second/limit' ] || fail "changed no-go-paths did not converge"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
@@ -315,8 +323,9 @@ test_propagate_lib() {
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
-    "$src/backend" "$src/herdr-presentation-spaces"
+    "$src/backend" "$src/herdr-presentation-spaces" "$src/no-go-paths"
   propagate_inheritable_config "$src" "$dest"
+  [ -e "$dest/no-go-paths" ] && fail "no-go-paths absence not mirrored downstream"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
@@ -380,6 +389,131 @@ test_propagate_lib() {
   [ ! -e "$guard_repo/config/crew-dispatch.json" ] || fail "guard skip still copied the unignored item"
 
   pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
+}
+
+# A primary item that EXISTS but is not a readable regular file is a propagation
+# error, never "the primary has no value". Mirroring it as absence would delete
+# the destination's inherited copy on the strength of a broken source, and for
+# config/no-go-paths that means deleting the operator's declared boundary out of
+# a live secondmate home during an ordinary bootstrap sweep. The destination copy
+# must survive untouched and the caller must see a failure.
+test_propagate_unusable_source_is_an_error_not_absence() {
+  local d src dest label report status stderr n=0
+  d="$TMP_ROOT/prop-unusable"
+  src="$d/src"
+  dest="$d/home/config"
+
+  for label in directory dangling-symlink symlink-to-directory unreadable-file; do
+    n=$((n + 1))
+    rm -rf "${src:?}" "${d:?}/home" "${d:?}/elsewhere"
+    mkdir -p "$src" "$dest" "$d/elsewhere"
+    printf '/downstream/limit\n' > "$dest/no-go-paths"
+    printf 'codex\n' > "$src/crew-harness"
+    printf 'codex\n' > "$dest/crew-harness"
+    case "$label" in
+      directory) mkdir -p "$src/no-go-paths" ;;
+      dangling-symlink) ln -s "$d/gone/no-go-paths" "$src/no-go-paths" ;;
+      symlink-to-directory) ln -s "$d/elsewhere" "$src/no-go-paths" ;;
+      unreadable-file)
+        [ "$(id -u)" != 0 ] || continue
+        printf '/primary/limit\n' > "$src/no-go-paths"
+        chmod 000 "$src/no-go-paths"
+        ;;
+    esac
+
+    report="$d/report-$n.tsv"
+    stderr="$d/unusable-$n.err"
+    : > "$report"
+    status=0
+    FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$dest" \
+      2>"$stderr" || status=$?
+
+    [ "$status" -ne 0 ] \
+      || fail "$label: an unusable primary source was not surfaced as a propagation failure"
+    fm_config_inherit_boundary_failed \
+      || fail "$label: an unusable primary boundary file did not set the boundary flag"
+    [ "$(cat "$dest/no-go-paths" 2>/dev/null)" = /downstream/limit ] \
+      || fail "$label: the downstream boundary file was modified or deleted"
+    assert_contains "$(cat "$stderr")" "fm-config-inherit: error: unusable primary source" \
+      "$label: no stderr diagnostic named the unusable source"
+    assert_contains "$(cat "$report")" $'no-go-paths\terror\t' \
+      "$label: the item was not recorded as an error"
+    grep -F 'mirrored primary absence' "$report" >/dev/null \
+      && fail "$label: an unusable source was reported as a successful absence mirror"
+    # Scoped: an unrelated item alongside it still propagates normally.
+    [ "$(cat "$dest/crew-harness")" = codex ] \
+      || fail "$label: an unusable boundary source disturbed an unrelated item"
+  done
+  pass "B1b propagate_inheritable_config: an unusable primary source errors and never mirrors as absence"
+}
+
+# An unsearchable PRIMARY config/ is not "the primary has no value" - nobody
+# looked. Reading it as absence would run the mirror branch for EVERY item and
+# rm -f each secondmate home's inherited copy, including the boundary file, while
+# reporting success. This is the silent-data-destruction case: the downstream
+# copies must survive untouched and the caller must see a failure.
+test_propagate_undeterminable_source_dir_never_mirrors_absence() {
+  local d src dest status report stderr
+  if [ "$(id -u)" = 0 ]; then
+    pass "B1d propagate_inheritable_config: undeterminable source (skipped: root searches every directory)"
+    return 0
+  fi
+  d="$TMP_ROOT/prop-undeterminable"
+  src="$d/src"
+  dest="$d/home/config"
+  mkdir -p "$src" "$dest"
+  printf '/downstream/limit\n' > "$dest/no-go-paths"
+  printf 'codex\n' > "$dest/crew-harness"
+  printf '/primary/limit\n' > "$src/no-go-paths"
+  printf 'claude\n' > "$src/crew-harness"
+  report="$d/report.tsv"
+  stderr="$d/undeterminable.err"
+  : > "$report"
+
+  chmod 000 "$src"
+  status=0
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$dest" \
+    2>"$stderr" || status=$?
+  chmod 700 "$src"
+
+  [ "$status" -ne 0 ] \
+    || fail "undeterminable source: an unreadable primary config dir was not surfaced as a failure"
+  fm_config_inherit_boundary_failed \
+    || fail "undeterminable source: the boundary flag was not set"
+  [ "$(cat "$dest/no-go-paths" 2>/dev/null)" = /downstream/limit ] \
+    || fail "undeterminable source: the downstream boundary file was deleted or modified"
+  [ "$(cat "$dest/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "undeterminable source: an ordinary downstream item was deleted or modified"
+  grep -F 'mirrored primary absence' "$report" >/dev/null \
+    && fail "undeterminable source: reported as a successful absence mirror"
+  assert_contains "$(cat "$stderr")" 'undeterminable primary source' \
+    "undeterminable source: no diagnostic named the undeterminable state"
+  assert_contains "$(cat "$stderr")" 'is not searchable' \
+    "undeterminable source: the diagnostic did not name the unsearchable directory"
+  pass "B1d propagate_inheritable_config: an unreadable primary config dir errors and deletes nothing"
+}
+
+# The boundary flag stays scoped to config/no-go-paths: the same unusable-source
+# error on any other item is a plain non-fatal propagation failure, so a
+# secondmate launch is not aborted by an advisory item.
+test_unusable_source_boundary_flag_is_scoped_to_no_go_paths() {
+  local d src dest status
+  d="$TMP_ROOT/prop-unusable-scope"
+  src="$d/src"
+  dest="$d/home/config"
+  mkdir -p "$src" "$dest"
+  ln -s "$d/gone/crew-harness" "$src/crew-harness"
+  printf 'claude\n' > "$dest/crew-harness"
+
+  status=0
+  propagate_inheritable_config "$src" "$dest" 2>/dev/null || status=$?
+
+  [ "$status" -ne 0 ] || fail "scope: an unusable non-boundary source must still fail"
+  fm_config_inherit_boundary_failed \
+    && fail "scope: an unusable non-boundary source set the boundary flag"
+  [ "$(cat "$dest/crew-harness")" = claude ] \
+    || fail "scope: the destination copy was removed on the strength of a broken source"
+  pass "B1c propagate_inheritable_config: the fatal boundary flag stays scoped to no-go-paths"
 }
 
 # ===========================================================================
@@ -467,6 +601,104 @@ test_spawn_split_and_inherit() {
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
+}
+
+# Same as spawn_secondmate, but surfaces the spawn's own exit status and output
+# so a case can assert that a launch was REFUSED rather than merely warned about.
+spawn_secondmate_status() {  # <world> <id> <home>
+  local world=$1 id=$2 home=$3 fakebin
+  mkdir -p "$world/home/state" "$world/home/data"
+  fakebin=$(make_noop_tmux "$world/tmux-$id")
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" --secondmate 2>&1
+}
+
+# A seeded secondmate home that is its own git repo, so the destination guard is
+# actually consulted: it allows an inherited item only when the home's repo
+# ignores that path. Anything not listed in <ignored...> is therefore skipped.
+make_git_seeded_home() {  # <home> <id> [ignored-config-rel-path...]
+  local home=$1 id=$2 rel
+  make_seeded_home "$home" "$id"
+  git init -q -b main "$home"
+  : > "$home/.gitignore"
+  shift 2
+  for rel in "$@"; do
+    printf '%s\n' "$rel" >> "$home/.gitignore"
+  done
+  git -C "$home" add .gitignore AGENTS.md
+  git -C "$home" commit -qm seed
+}
+
+# The boundary file is the one inherited item whose propagation failure is not
+# advisory: a home launched without it would dispatch its OWN crewmates into the
+# operator's off-limits directories. So a skipped no-go-paths push refuses the
+# launch, while the same skip on any other item stays the warning it has always
+# been.
+test_spawn_refuses_when_the_boundary_file_cannot_be_inherited() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-boundary-fatal"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf '/off/limits\n' > "$w/home/config/no-go-paths"
+  make_git_seeded_home "$sm" sm config/crew-harness
+
+  out=$(spawn_secondmate_status "$w" sm "$sm")
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "boundary: a home that cannot inherit no-go-paths must not launch: $out"
+  assert_contains "$out" "could not inherit config/no-go-paths" \
+    "boundary: the refusal did not name the boundary file"
+  [ ! -e "$sm/config/no-go-paths" ] \
+    || fail "boundary: the home was left with a boundary file the guard reported as skipped"
+  [ ! -e "$w/home/state/sm.meta" ] \
+    || fail "boundary: a refused secondmate launch still wrote task metadata"
+  pass "B2b spawn: a secondmate that cannot inherit config/no-go-paths is refused, not warned"
+}
+
+# The control for that refusal: the identical fixture with the home ignoring the
+# boundary file propagates it and launches, so the refusal above comes from the
+# failed push and not from having a boundary file at all.
+test_spawn_launches_when_the_boundary_file_inherits() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-boundary-ok"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf '/off/limits\n' > "$w/home/config/no-go-paths"
+  make_git_seeded_home "$sm" sm config/no-go-paths config/crew-harness
+
+  out=$(spawn_secondmate_status "$w" sm "$sm")
+  status=$?
+
+  expect_code 0 "$status" "boundary control: an inheritable boundary file must still launch"
+  [ "$(cat "$sm/config/no-go-paths" 2>/dev/null)" = /off/limits ] \
+    || fail "boundary control: the boundary file was not propagated: $out"
+  [ -f "$w/home/state/sm.meta" ] || fail "boundary control: no meta written: $out"
+  pass "B2c spawn: a secondmate whose home accepts the boundary file launches as before"
+}
+
+# The hard constraint on that fatality: a PRIMARY with no config/no-go-paths is
+# the unrestricted default, so mirroring that absence downstream must stay
+# non-fatal even when the destination guard refuses the removal.
+test_spawn_absent_primary_boundary_stays_non_fatal() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-boundary-absent"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  make_git_seeded_home "$sm" sm config/crew-harness
+  mkdir -p "$sm/config"
+  printf '/stale/limit\n' > "$sm/config/no-go-paths"
+
+  out=$(spawn_secondmate_status "$w" sm "$sm")
+  status=$?
+
+  expect_code 0 "$status" "absent primary boundary: an unrestricted primary must still launch"
+  [ -f "$w/home/state/sm.meta" ] || fail "absent primary boundary: no meta written: $out"
+  pass "B2d spawn: an unrestricted primary still launches when the downstream absence-mirror is skipped"
 }
 
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
@@ -894,6 +1126,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+    printf 'config/no-go-paths\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1014,6 +1247,54 @@ reread_instruction_path() {
 
 reread_pending_path() {
   printf '%s.pending\n' "$(reread_instruction_path "$1")"
+}
+
+# config/no-go-paths inherits like every other item but must never reach an agent.
+# Its bytes are the operator's private absolute paths, and it is a mechanical
+# refusal at dispatch time rather than a default the agent weighs, so the reread
+# framing would state the opposite of its contract. The exclusion is pinned here
+# so a future FM_INHERITABLE_CONFIG addition cannot silently re-enrol it.
+test_boundary_file_inherits_but_is_never_inlined_into_a_reread() {
+  local w head status instruction secret
+  w=$(new_world boundary-no-reread)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  secret='/Users/private/off-limits-marker-9c2f'
+
+  fm_config_reread_is_allowlisted_item no-go-paths \
+    && fail "boundary reread: the boundary file is allowlisted for the agent-visible reread"
+  fm_config_reread_is_allowlisted_item crew-harness \
+    || fail "boundary reread: the exclusion swallowed an ordinary inherited item"
+
+  # A push that changes ONLY the boundary file must still propagate it and must
+  # send nothing at all: there is no allowlisted change to tell the agent about.
+  printf '%s\n' "$secret" > "$w/home/config/no-go-paths"
+  run_config_push "$w" >/dev/null 2>"$w/boundary.err"; status=$?
+  expect_code 0 "$status" "boundary reread: a boundary-only push should succeed"
+  [ "$(cat "$w/sm/config/no-go-paths" 2>/dev/null)" = "$secret" ] \
+    || fail "boundary reread: the boundary file did not propagate"
+  reread_instruction_path "$w/sm" >/dev/null 2>&1 \
+    && fail "boundary reread: a boundary-only push wrote an agent-visible instruction"
+
+  # And when an ordinary item does change alongside it, the instruction that gets
+  # written must carry the ordinary item and none of the boundary bytes.
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf '%s\n%s/second\n' "$secret" "$secret" > "$w/home/config/no-go-paths"
+  run_config_push "$w" >/dev/null 2>>"$w/boundary.err"; status=$?
+  expect_code 0 "$status" "boundary reread: a mixed push should succeed"
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "boundary reread: the ordinary item did not propagate"
+  grep -Fq "$secret/second" "$w/sm/config/no-go-paths" \
+    || fail "boundary reread: the changed boundary file did not converge downstream"
+  instruction=$(reread_instruction_path "$w/sm") \
+    || fail "boundary reread: no instruction was written for the changed ordinary item"
+  assert_contains "$(cat "$instruction")" 'config/crew-harness' \
+    "boundary reread: the instruction lost its ordinary item"
+  grep -Fq "$secret" "$instruction" \
+    && fail "boundary reread: the instruction inlined the operator's private no-go paths"
+  assert_not_contains "$(cat "$instruction")" 'config/no-go-paths' \
+    "boundary reread: the instruction still names the boundary file"
+  pass "B27 the boundary file inherits into every home but is never inlined into an agent reread"
 }
 
 reread_retry_stage_path() {
@@ -2313,7 +2594,13 @@ test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
+test_propagate_unusable_source_is_an_error_not_absence
+test_propagate_undeterminable_source_dir_never_mirrors_absence
+test_unusable_source_boundary_flag_is_scoped_to_no_go_paths
 test_spawn_split_and_inherit
+test_spawn_refuses_when_the_boundary_file_cannot_be_inherited
+test_spawn_launches_when_the_boundary_file_inherits
+test_spawn_absent_primary_boundary_stays_non_fatal
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
@@ -2333,6 +2620,7 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_boundary_file_inherits_but_is_never_inlined_into_a_reread
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge

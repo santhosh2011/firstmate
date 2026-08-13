@@ -69,6 +69,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation and config-reread delivery |
+| `fm-no-go-lib.sh`        | Single owner of operator-declared no-go path matching and dispatch refusal (docs/configuration.md "No-go paths") |
+| `fm-path-state-lib.sh`   | Single owner of the exists/provably-absent/undeterminable path classification guards fail closed on |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor for the bootstrap diagnostic                  |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |

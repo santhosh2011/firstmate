@@ -44,6 +44,12 @@ ws="$home/projects/$proj/$slug"
 case "$cmd" in
   new)
     mkdir -p "$ws"
+    # The two pieces of sdev-owned state outside the workspace dir, modelled so a
+    # case can tell "left alone" from "force-removed": `destroy` takes the port
+    # offset and the ledger entry with the worktrees, nothing else touches them.
+    mkdir -p "$home/state/offsets" "$home/state/ledger"
+    printf '4200\n' > "$home/state/offsets/$proj-$slug"
+    printf 'alive %s\n' "$slug" > "$home/state/ledger/$proj-$slug"
     while IFS= read -r p; do
       [ -n "$p" ] || continue
       if [ "${FM_FAKE_SDEV_BREAK:-}" = "$p" ]; then
@@ -55,6 +61,18 @@ case "$cmd" in
     ;;
   cd) printf '%s\n' "$ws" ;;
   up) : > "$ws/.fake-up" ;;
+  destroy)
+    # The removing verb: drop each per-repo worktree from its source repo and
+    # take the workspace dir, the port offset, and the ledger entry with it.
+    # `end` archives instead, and this fake keeps that distinction so a test can
+    # tell the two apart by real state rather than by which command ran.
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      git -C "$home/core/$proj/$p" worktree remove --force "$ws/$p" >/dev/null 2>&1 || true
+    done < <(yq -r '.repos | to_entries | .[] | .value.path' "$reg")
+    rm -rf "$ws"
+    rm -f "$home/state/offsets/$proj-$slug" "$home/state/ledger/$proj-$slug"
+    ;;
   *) exit 0 ;;
 esac
 exit 0
@@ -212,7 +230,77 @@ test_non_sdev_project_uses_treehouse_unchanged() {
   pass "fm-spawn leaves the treehouse path unchanged for a non-SDev project"
 }
 
+# A no-go refusal on the SDev path must leave nothing inside the operator's
+# off-limits directory, which for this provider means REMOVING the workspace, not
+# archiving it: an archive under SDEV_HOME would still sit inside the declared
+# prefix. Removal is asserted against real git state - the workspace dir is gone
+# and each source repo no longer lists its per-repo worktree.
+test_sdev_workspace_inside_a_no_go_path_is_refused_and_removed() {
+  local parts case_dir home sdev fakebin id ws p code
+  parts=$(setup_case nogo scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-nogo
+  ws="$sdev/projects/scdi/$id"
+  printf '%s\n' "$sdev/projects" > "$home/config/no-go-paths"
+  set +e
+  FM_FAKE_PANE_PATH="$ws" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
+  code=$?
+  set -e
+  rm -rf "/tmp/fm-$id"
+
+  [ "$code" -ne 0 ] || fail "no-go: an SDev workspace inside a declared prefix must refuse"
+  assert_grep "is inside the no-go path" "$case_dir/err" "no-go: the workspace was not checked"
+  [ ! -d "$ws" ] || fail "no-go: the refusal left the SDev workspace inside the off-limits directory"
+  [ ! -e "$sdev/state/offsets/scdi-$id" ] || fail "no-go: the refusal left the port offset behind"
+  [ ! -e "$sdev/state/ledger/scdi-$id" ] || fail "no-go: the refusal left the ledger entry behind"
+  for p in multi_api_src multi_ui_src common; do
+    git -C "$sdev/core/scdi/$p" worktree list --porcelain 2>/dev/null | grep -Fq "$ws/$p" \
+      && fail "no-go: $p's worktree is still registered after the refusal"
+  done
+  assert_present "$home/state" "no-go: the home state dir should still exist"
+  [ ! -e "$home/state/$id.meta" ] || fail "no-go: a refused SDev spawn wrote task metadata"
+  [ ! -s "$case_dir/launch.log" ] || fail "no-go: a refused SDev spawn launched a crewmate"
+  pass "an SDev workspace inside a no-go path is refused and removed, not archived"
+}
+
+# The counterpart that pins the two abort paths apart. Force-removal belongs to
+# the no-go refusal alone; an ORDINARY abort in the same armed span must leave
+# the workspace, its port offset, and its ledger entry exactly as they were,
+# which is what the spawn did before this teardown existed. The abort here is the
+# real one: a pre-existing FILE at the per-task temp root makes `mkdir -p
+# "$TASK_TMP/gotmp"` fail under set -e, just after the workspace is armed.
+test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger() {
+  local parts case_dir home sdev fakebin id ws code
+  parts=$(setup_case ordinary-abort scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-ordinary-abort
+  ws="$sdev/projects/scdi/$id"
+  # No config/no-go-paths at all, so nothing about this abort is a refusal.
+  printf 'blocking file, not a directory\n' > "/tmp/fm-$id"
+  set +e
+  FM_FAKE_PANE_PATH="$ws" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
+  code=$?
+  set -e
+  rm -f "/tmp/fm-$id"
+
+  [ "$code" -ne 0 ] || fail "ordinary abort: the fixture did not actually abort the spawn"
+  assert_no_grep "is inside the no-go path" "$case_dir/err" \
+    "ordinary abort: this case must not be a no-go refusal"
+  [ -d "$ws" ] || fail "ordinary abort: a non-refusal abort removed the SDev workspace"
+  assert_present "$sdev/state/offsets/scdi-$id" \
+    "ordinary abort: a non-refusal abort freed the port offset"
+  assert_present "$sdev/state/ledger/scdi-$id" \
+    "ordinary abort: a non-refusal abort removed the ledger entry"
+  assert_grep 4200 "$sdev/state/offsets/scdi-$id" "ordinary abort: the port offset was rewritten"
+  [ ! -s "$case_dir/launch.log" ] || fail "ordinary abort: a crewmate was launched"
+  pass "an ordinary abort leaves the SDev workspace, port offset, and ledger entry in place"
+}
+
 test_sdev_backed_takes_sdev_path
 test_sdev_workspace_repos_are_isolated_worktrees
 test_sdev_isolation_failure_aborts
+test_sdev_workspace_inside_a_no_go_path_is_refused_and_removed
+test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger
 test_non_sdev_project_uses_treehouse_unchanged
