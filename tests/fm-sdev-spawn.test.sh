@@ -83,10 +83,16 @@ SH
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  # The relaunch precondition reads the pane's foreground command to decide
+  # whether the endpoint is positively agent-free. Default keeps the historic
+  # answer; a case that needs an agent-free verdict sets a shell name.
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  # A recorded window must appear in a successful inventory before tmux's
+  # foreground read is trusted, so a relaunch case declares its window here.
+  list-windows) printf '%s' "${FM_FAKE_WINDOWS:-}"; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
@@ -133,7 +139,14 @@ setup_case() {
   printf '%s|%s|%s|%s\n' "$case_dir" "$home" "$sdev" "$fakebin"
 }
 
+# Ship spawns carry the explicit per-task delivery contract fm-spawn.sh requires.
+# run_spawn_raw is the same call without it, for --relaunch, which reuses the
+# task's recorded mode and refuses a flag that would override it.
 run_spawn() {
+  run_spawn_raw "$@" --mode no-mistakes --yolo off
+}
+
+run_spawn_raw() {
   local home=$1 sdev=$2 fakebin=$3
   shift 3
   PATH="$fakebin:$PATH" \
@@ -218,7 +231,7 @@ test_non_sdev_project_uses_treehouse_unchanged() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_FAKE_PANE_PATH="$wt" FM_FAKE_SEND_LOG="$case_dir/send.log" \
-    env -u SDEV_HOME "$SPAWN" "$id" projects/scdi >/dev/null 2>"$case_dir/err" \
+    env -u SDEV_HOME "$SPAWN" "$id" projects/scdi --mode no-mistakes --yolo off >/dev/null 2>"$case_dir/err" \
     || { cat "$case_dir/err"; fail "control spawn should succeed"; }
 
   meta="$home/state/$id.meta"
@@ -298,9 +311,55 @@ test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger() {
   pass "an ordinary abort leaves the SDev workspace, port offset, and ledger entry in place"
 }
 
+# M1 regression. Upstream's --relaunch adopts a task's RECORDED worktree and
+# launches a replacement agent into it. For an SDev task that recorded worktree
+# is the multi-repo workspace, which already exists, so the workspace provider
+# must not run again: `sdev new <slug>` against a live slug is not idempotent.
+# Detected through sdev's own out-of-workspace state, the same way this file
+# tells "left alone" from "force-removed" - the fake rewrites the ledger entry on
+# every `new`, so a sentinel that survives proves `new` did not run twice.
+test_sdev_relaunch_reuses_the_recorded_workspace() {
+  local parts case_dir home sdev fakebin id meta ws
+  parts=$(setup_case relaunch scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-relaunch
+  ws="$sdev/projects/scdi/$id"
+
+  FM_FAKE_PANE_PATH="$ws" \
+  FM_FAKE_SEND_LOG="$case_dir/send1.log" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch1.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err1" \
+    || { echo "first spawn failed:"; cat "$case_dir/err1"; fail "relaunch: the initial SDev spawn should succeed"; }
+
+  meta="$home/state/$id.meta"
+  assert_eq "$(meta_val "$meta" worktree)" "$ws" "relaunch: the first spawn recorded the workspace"
+  printf 'sentinel-not-rewritten\n' > "$sdev/state/ledger/scdi-$id"
+
+  # A relaunch adopts a live endpoint, so the fake must present one: the recorded
+  # window in the inventory, and a plain shell as its foreground command so the
+  # endpoint reads as positively agent-free.
+  FM_FAKE_PANE_PATH="$ws" \
+  FM_FAKE_WINDOWS="$(meta_val "$meta" window | cut -d: -f2-)"$'\n' \
+  FM_FAKE_PANE_COMMAND=bash \
+  FM_FAKE_SEND_LOG="$case_dir/send2.log" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch2.log" \
+    run_spawn_raw "$home" "$sdev" "$fakebin" "$id" --relaunch >/dev/null 2>"$case_dir/err2" \
+    || { echo "relaunch failed:"; cat "$case_dir/err2"; fail "relaunch: an SDev task should relaunch into its recorded workspace"; }
+
+  assert_grep sentinel-not-rewritten "$sdev/state/ledger/scdi-$id" \
+    "relaunch: \`sdev new\` ran a second time and rewrote the ledger entry"
+  assert_eq "$(meta_val "$meta" worktree)" "$ws" "relaunch: the recorded workspace is unchanged"
+  assert_eq "$(meta_val "$meta" slug)" "$id" "relaunch: slug= survives the relaunch"
+  assert_eq "$(meta_val "$meta" repos)" "api ui common" "relaunch: repos= survives the relaunch"
+  assert_grep "$home/data/$id/brief.md" "$case_dir/launch2.log" "relaunch: a replacement agent is launched"
+  assert_no_grep "treehouse get" "$case_dir/send2.log" "relaunch: the treehouse path must stay out of an SDev relaunch"
+  pass "an SDev relaunch reuses the recorded workspace instead of creating a second one"
+}
+
 test_sdev_backed_takes_sdev_path
 test_sdev_workspace_repos_are_isolated_worktrees
 test_sdev_isolation_failure_aborts
 test_sdev_workspace_inside_a_no_go_path_is_refused_and_removed
 test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger
 test_non_sdev_project_uses_treehouse_unchanged
+test_sdev_relaunch_reuses_the_recorded_workspace

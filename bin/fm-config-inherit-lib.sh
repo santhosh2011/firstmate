@@ -7,13 +7,21 @@
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
-# bounds that home's startup-memory curation, primary
-# config/herdr-presentation-spaces enables the same default-off Herdr presentation
-# projection, and primary config/no-go-paths holds that home's own crewmates to
-# the same off-limits directories so a secondmate cannot route around a
-# machine-wide boundary). It also pushes the one primary-authoritative shared
-# captain-preference file, data/captain-shared.md, into each secondmate home's
-# data/ as a read-only copy.
+# bounds that home's startup-memory curation, and primary
+# config/herdr-presentation-spaces carries the same Herdr presentation-projection
+# preference - an absent primary file and an absent destination file both mean
+# the same unconfigured default, so the generic absence mirror below converges
+# a secondmate without deciding the release-dependent floor; explicit "on" and
+# "off" preferences propagate as files. Primary
+# config/trace-context is copied at the launch convergence point as part of the
+# default-off W3C trace-context setup, while live convergence leaves it unchanged.
+# The primary passes its frozen home-session decision into a newly launched
+# Secondmate; see docs/trace-context.md. Primary config/no-go-paths holds that
+# home's own crewmates to the same off-limits directories, so a secondmate
+# cannot route around a machine-wide boundary.
+# It also pushes
+# the one primary-authoritative shared captain-preference file,
+# data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -35,6 +43,15 @@
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
+#
+# That single declaration is also the ONE owner of the inherited-material
+# allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
+# bin/fm-remote-inherit.sh (receiver, executing inside the remote home) both
+# derive their item set from fm_config_inherit_items rather than restating it,
+# so a new inheritable item cannot be accepted by one side and refused by the
+# other. A local and remote code root that disagree about this list must be
+# reconciled by the ordinary remote sync/update path before the transfer
+# succeeds; there is no separate allowlist version negotiation.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
@@ -65,7 +82,36 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget no-go-paths}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context no-go-paths}"
+
+# Items whose value is a home-SESSION enablement decision rather than durable
+# local configuration. They are inherited at the launch convergence point, where
+# the primary also hands the new process its frozen on/off decision, and left
+# untouched by live convergence into an already-running home, whose decision is
+# already frozen for its current session (bin/fm-trace-context-lib.sh).
+FM_SESSION_SCOPED_INHERITABLE_CONFIG="trace-context"
+
+# True when <item> is session-scoped in the sense above.
+fm_config_inherit_item_session_scoped() {  # <item>
+  local item=$1 candidate
+  for candidate in $FM_SESSION_SCOPED_INHERITABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
+# The complete declared inherited-material set as home-relative paths, one per
+# line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,
+# then the one shared data file. This is what remote senders and receivers
+# derive from, so both ends of a transfer agree by construction. config/no-go-paths
+# rides this same derivation, so the boundary reaches remote homes too.
+fm_config_inherit_items() {
+  local item
+  for item in $FM_INHERITABLE_CONFIG; do
+    printf 'config/%s\n' "$item"
+  done
+  printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
+}
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -488,6 +534,10 @@ propagate_inheritable_config() {
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
     esac
+    if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ] && fm_config_inherit_item_session_scoped "$item"; then
+      record_inheritable_config_result "$item" unchanged "session-scoped"
+      continue
+    fi
     src="$src_config/$item"
     dest="$dest_config/$item"
     # This one scalar config is consumed as a local safety boundary, so reject

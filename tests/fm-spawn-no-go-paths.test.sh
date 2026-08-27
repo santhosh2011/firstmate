@@ -71,7 +71,7 @@ test_prefix_matching() {
     mkdir -p "$d/nogo/proj" "$d/nogo-sibling" "$d/home/blocked/deep/deeper"
     # shellcheck disable=SC2059  # the table supplies the \n separators on purpose
     printf "${config//@D/$d}\n" > "$d/home/config/no-go-paths"
-    out=$(run_spawn "$d" "$id" "${project//@D/$d}" codex)
+    out=$(run_spawn "$d" "$id" "${project//@D/$d}" codex --mode no-mistakes --yolo off)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn should never succeed in this suite"
     case "$verdict" in
@@ -109,7 +109,7 @@ test_absent_file_is_unrestricted() {
   local d out status
   d=$(new_case absent)
   [ ! -e "$d/home/config/no-go-paths" ] || fail "fixture wrote a config file"
-  out=$(run_spawn "$d" nogo-absent-q7 "$d/nogo/proj" codex)
+  out=$(run_spawn "$d" nogo-absent-q7 "$d/nogo/proj" codex --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn with a missing brief should still fail"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -125,7 +125,7 @@ test_refusal_names_path_and_prefix() {
   local d out
   d=$(new_case message)
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" nogo-msg-q7 "$d/nogo/proj" codex)
+  out=$(run_spawn "$d" nogo-msg-q7 "$d/nogo/proj" codex --mode no-mistakes --yolo off)
   printf '%s\n' "$out" | grep -F "$d/nogo/proj" >/dev/null \
     || fail "refusal did not name the offending path: $out"
   printf '%s\n' "$out" | grep -F "'$d/nogo'" >/dev/null \
@@ -142,7 +142,7 @@ test_refusal_leaves_no_state() {
   d=$(new_case leftovers)
   id=nogo-clean-q7
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" "$id" "$d/nogo/proj" codex)
+  out=$(run_spawn "$d" "$id" "$d/nogo/proj" codex --mode no-mistakes --yolo off)
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null || fail "fixture did not refuse: $out"
   [ ! -e "$d/home/state/$id.meta" ] || fail "a refused spawn wrote task metadata"
   [ ! -e "$d/home/state/$id.status" ] || fail "a refused spawn wrote a task status file"
@@ -163,7 +163,7 @@ test_batch_refuses_only_the_offending_pair() {
   # no-go check, so ambient detection - claude under an agent, unknown on a CI
   # runner - would decide this case instead of the guard.
   out=$(run_spawn "$d" --harness codex \
-    "nogo-batch-a-q7=$d/nogo/proj" "nogo-batch-b-q8=$d/allowed")
+    "nogo-batch-a-q7=$d/nogo/proj" "nogo-batch-b-q8=$d/allowed" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a batch containing a refused pair must exit non-zero"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -245,7 +245,7 @@ test_malformed_line_refuses() {
     d=$(new_case "malformed-$n")
     # shellcheck disable=SC2059  # the table supplies the \n separators on purpose
     printf "${config//@D/$d}\n" > "$d/home/config/no-go-paths"
-    out=$(run_spawn "$d" "nogo-bad$n-q7" "$d/allowed" codex)
+    out=$(run_spawn "$d" "nogo-bad$n-q7" "$d/allowed" codex --mode no-mistakes --yolo off)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: malformed config must not spawn"
     printf '%s\n' "$out" | grep -F 'is not an absolute path prefix' >/dev/null \
@@ -346,7 +346,7 @@ run_worktree_spawn() {  # <home> <project> <worktree> <fakebin> <id> [tmux-log]
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_TMUX_LOG="${6:-}" \
     FM_FAKE_PANE_PATH="$3" PATH="$4:$PATH" \
-    "$SPAWN" "$5" "$2" 2>&1
+    "$SPAWN" "$5" "$2" --mode no-mistakes --yolo off 2>&1
 }
 
 test_worktree_inside_a_no_go_path_is_refused() {
@@ -500,7 +500,7 @@ test_unreadable_config_refuses() {
         chmod 000 "$d/home/config/no-go-paths"
         ;;
     esac
-    out=$(run_spawn "$d" "nogo-unread$n-q7" "$d/allowed" codex)
+    out=$(run_spawn "$d" "nogo-unread$n-q7" "$d/allowed" codex --mode no-mistakes --yolo off)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: an unreadable config must not spawn"
     printf '%s\n' "$out" | grep -F 'the declared no-go paths cannot be read' >/dev/null \
@@ -521,7 +521,7 @@ test_symlinked_config_still_restricts() {
   d=$(new_case symlinked)
   printf '%s\n' "$d/nogo" > "$d/dotfiles-no-go-paths"
   ln -s "$d/dotfiles-no-go-paths" "$d/home/config/no-go-paths"
-  out=$(run_spawn "$d" nogo-symlink-q7 "$d/nogo/proj" codex)
+  out=$(run_spawn "$d" nogo-symlink-q7 "$d/nogo/proj" codex --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a symlinked config must still refuse a matching path"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -590,7 +590,7 @@ test_unsearchable_config_dir_refuses() {
   d=$(new_case unsearchable-config)
   printf '%s\n' "$d/nogo" > "$d/home/config/no-go-paths"
   chmod 000 "$d/home/config"
-  out=$(run_spawn "$d" nogo-unsearch-q7 "$d/allowed" codex)
+  out=$(run_spawn "$d" nogo-unsearch-q7 "$d/allowed" codex --mode no-mistakes --yolo off)
   status=$?
   chmod 700 "$d/home/config"
   [ "$status" -ne 0 ] || fail "an unsearchable config dir must not silently allow a dispatch: $out"
