@@ -37,7 +37,7 @@ test_sdev_ship_brief_lists_repos_and_branches() {
   local parts home sdev brief
   parts=$(make_case list scdi multi-repo.yml)
   IFS='|' read -r home sdev <<<"$parts"
-  run_brief "$home" "$sdev" task-list scdi --sdev >/dev/null 2>&1 \
+  run_brief "$home" "$sdev" task-list scdi --sdev --mode no-mistakes >/dev/null 2>&1 \
     || fail "sdev ship brief should scaffold for an SDev-backed project"
   brief="$home/data/task-list/brief.md"
   assert_present "$brief" "sdev brief: written"
@@ -68,7 +68,7 @@ test_sdev_flag_rejected_for_non_sdev_project() {
   err="$TMP_ROOT/nonsdev.err"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
-    env -u SDEV_HOME "$BRIEF" task-x notaproject --sdev >/dev/null 2>"$err" \
+    env -u SDEV_HOME "$BRIEF" task-x notaproject --sdev --mode no-mistakes >/dev/null 2>"$err" \
     && fail "sdev: --sdev for a non-SDev project must be rejected"
   assert_grep "not SDev-backed" "$err" "sdev: error explains the project is not SDev-backed"
   pass "fm-brief --sdev refuses a project that is not SDev-backed"
