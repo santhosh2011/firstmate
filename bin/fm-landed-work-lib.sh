@@ -13,7 +13,10 @@
 # remote-tracking refs may prove work landed, while missing or stale proof retains
 # the workspace.
 # FM_LANDED_WORK_DISCOVER_TASK_BRANCH=1 accepts only task/<id>, fm/<id>, a
-# detached landed commit, or the registered base with both task refs absent.
+# detached landed commit, or the registered base with both task refs absent -
+# in the last case HEAD itself (the base checkout) is compared against the
+# registry-derived base ref so unpushed local commits are never mistaken for
+# landed work.
 
 default_branch() {
   local ref branch
@@ -227,7 +230,7 @@ validate_sdev_teardown_safety() {
             unlanded="$unlanded $key(ownership-unclear)"
             continue
           fi
-          task_branch="refs/heads/__firstmate_absent_task_branch__"
+          task_branch=HEAD
           ;;
         *)
           unlanded="$unlanded $key(ownership-unclear)"

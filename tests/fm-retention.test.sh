@@ -214,6 +214,60 @@ EOF
   pass "orphan SDev workspaces use registry bases and disclosed evidence clocks while non-task directories remain"
 }
 
+make_orphan_base_repo() {
+  local repo=$1 origin=$2
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  printf '%s\n' main > "$repo/base.txt"
+  git -C "$repo" add base.txt
+  GIT_AUTHOR_DATE=2020-01-01T00:00:00Z GIT_COMMITTER_DATE=2020-01-01T00:00:00Z \
+    git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm main
+  git -C "$repo" branch -M main
+  git -C "$repo" checkout -qb develop
+  printf '%s\n' develop > "$repo/develop.txt"
+  git -C "$repo" add develop.txt
+  GIT_AUTHOR_DATE=2020-01-02T00:00:00Z GIT_COMMITTER_DATE=2020-01-02T00:00:00Z \
+    git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm develop
+  git clone --quiet --bare "$repo" "$origin"
+  git -C "$repo" remote add origin "file://$(cd "$origin" && pwd)"
+  git -C "$repo" fetch --quiet origin
+  git -C "$repo" branch -u origin/develop develop
+  printf '%s\n' unpushed > "$repo/unpushed.txt"
+  git -C "$repo" add unpushed.txt
+  GIT_AUTHOR_DATE=2020-01-03T00:00:00Z GIT_COMMITTER_DATE=2020-01-03T00:00:00Z \
+    git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unpushed
+  find "$repo" -type f -exec touch -t 202001030000 {} +
+}
+
+test_orphan_sdev_workspace_checked_out_on_base_with_unpushed_commit_is_retained() {
+  local world home sdev tree workspace out
+  world="$TMP_ROOT/orphan-sdev-base"
+  home="$world/home"
+  sdev="$world/sdev"
+  tree="$world/treehouse"
+  workspace="$sdev/projects/pdmt/orphan-base-a1"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$sdev/core/projects.d" "$workspace" "$tree"
+  write_backlog "$home"
+  cat > "$sdev/core/projects.d/pdmt.yml" <<'EOF'
+repos:
+  chips:
+    path: chips
+    default_base: develop
+EOF
+  make_orphan_base_repo "$workspace/chips" "$world/origin-chips.git"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" SDEV_HOME="$sdev" TREEHOUSE_ROOT="$tree" \
+    FM_RETENTION_TODAY=2026-09-07 "$RETENTION")
+  assert_contains "$out" 'orphan-base-a1' "orphan base-branch workspace identity was lost"
+  assert_contains "$out" 'landed-work check refused' "workspace checked out on base with an unpushed commit was not refused"
+  case "$out" in
+    *$'REMOVE\tsdev-workspace\t'*'orphan-base-a1'*)
+      fail "workspace checked out on base with an unpushed local commit was swept"
+      ;;
+  esac
+  [ -f "$workspace/chips/unpushed.txt" ] || fail "unpushed commit content vanished from the workspace"
+  pass "SDev workspace checked out on the registered base with an unpushed commit is retained, not swept"
+}
+
 test_orphan_treehouse_worktree_uses_its_own_evidence() {
   local world rec home tree source worktree stray out
   world="$TMP_ROOT/orphan-treehouse"
@@ -241,4 +295,5 @@ test_preview_uses_closure_age_and_refuses_unlanded_work
 test_apply_prunes_selected_records_but_preserves_briefs_and_protected_files
 test_scheduler_is_hourly_opportunity_with_once_daily_apply_gate
 test_orphan_sdev_workspace_uses_registry_base_and_fallback_clock
+test_orphan_sdev_workspace_checked_out_on_base_with_unpushed_commit_is_retained
 test_orphan_treehouse_worktree_uses_its_own_evidence
