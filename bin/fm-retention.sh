@@ -701,7 +701,7 @@ task_records_may_be_removed() {
 }
 
 stat_bytes() {
-  stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null
+  wc -c <"$1" 2>/dev/null | tr -d '[:space:]'
 }
 
 plan_reports_and_attachments() {
