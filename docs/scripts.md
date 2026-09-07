@@ -9,6 +9,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | ------------------------ | ------------------------------------------------------------------------------------ |
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
+| `fm-retention.sh`        | Preview or apply bounded fail-closed retention for closed-task artifacts               |
+| `fm-retention-schedule.sh` | Install, inspect, or remove the per-home macOS retention LaunchAgent                 |
 | `fm-operational-input.sh` | Construct and parse the canonical cross-language operational-input protocol |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
@@ -68,6 +70,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
+| `fm-landed-work-lib.sh`  | Shared landed-work refusal used by teardown and unattended retention                   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation and config-reread delivery |
 | `fm-no-go-lib.sh`        | Single owner of operator-declared no-go path matching and dispatch refusal (docs/configuration.md "No-go paths") |
 | `fm-path-state-lib.sh`   | Single owner of the exists/provably-absent/undeterminable path classification guards fail closed on |

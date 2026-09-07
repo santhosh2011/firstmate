@@ -35,14 +35,17 @@
 #                       also run only when locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   4. retention summary - one plain latest-summary sentence when a scheduled
+#                       retention run has published one.
+#   5. supervision instructions - render the detected harness protocol.
+#   6. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   7. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   8. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
@@ -307,7 +310,14 @@ else
   fi
 fi
 
-# --- 4. supervision operating instructions ----------------------------------
+# The detailed timestamped run logs stay under data/retention/runs/.
+# Session start deliberately surfaces only the captain-facing sentence.
+if [ -f "$DATA/retention/latest-summary" ] && [ ! -L "$DATA/retention/latest-summary" ]; then
+  subsection "RETENTION"
+  sed -n '1p' "$DATA/retention/latest-summary"
+fi
+
+# --- 5. supervision operating instructions ----------------------------------
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
@@ -334,7 +344,7 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 4. context digest -----------------------------------------------------
+# --- 6. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
@@ -342,7 +352,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 5. fleet-state digest ---------------------------------------------
+# --- 7. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
@@ -421,7 +431,7 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 6. closing reminder -----------------------------------------------
+# --- 8. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
