@@ -159,6 +159,86 @@ test_scheduler_is_hourly_opportunity_with_once_daily_apply_gate() {
   pass "native scheduler provides first-opportunity retries while the command owns one completed run per day"
 }
 
+make_old_registry_repo() {
+  local repo=$1 branch=$2
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  printf '%s\n' main > "$repo/base.txt"
+  git -C "$repo" add base.txt
+  GIT_AUTHOR_DATE=2020-01-01T00:00:00Z GIT_COMMITTER_DATE=2020-01-01T00:00:00Z \
+    git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm main
+  git -C "$repo" branch -M main
+  git -C "$repo" checkout -qb develop
+  printf '%s\n' develop > "$repo/develop.txt"
+  git -C "$repo" add develop.txt
+  GIT_AUTHOR_DATE=2020-01-02T00:00:00Z GIT_COMMITTER_DATE=2020-01-02T00:00:00Z \
+    git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm develop
+  git -C "$repo" checkout -qb "$branch"
+  find "$repo" -type f -exec touch -t 202001020000 {} +
+}
+
+test_orphan_sdev_workspace_uses_registry_base_and_fallback_clock() {
+  local world home sdev tree workspace unlanded stray out
+  world="$TMP_ROOT/orphan-sdev"
+  home="$world/home"
+  sdev="$world/sdev"
+  tree="$world/treehouse"
+  workspace="$sdev/projects/pdmt/orphan-registry-a1"
+  unlanded="$sdev/projects/pdmt/orphan-unlanded-b2"
+  stray="$sdev/projects/pdmt/aiworkshop"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$sdev/core/projects.d" "$workspace" "$unlanded" "$stray" "$tree"
+  write_backlog "$home"
+  cat > "$sdev/core/projects.d/pdmt.yml" <<'EOF'
+repos:
+  chips:
+    path: chips
+    default_base: develop
+EOF
+  make_old_registry_repo "$workspace/chips" task/orphan-registry-a1
+  make_old_registry_repo "$unlanded/chips" task/orphan-unlanded-b2
+  printf '%s\n' unlanded > "$unlanded/chips/unlanded.txt"
+  git -C "$unlanded/chips" add unlanded.txt
+  GIT_AUTHOR_DATE=2020-01-03T00:00:00Z GIT_COMMITTER_DATE=2020-01-03T00:00:00Z \
+    git -C "$unlanded/chips" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unlanded
+  find "$unlanded/chips" -type f -exec touch -t 202001030000 {} +
+  make_old_registry_repo "$stray/chips" task/aiworkshop
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" SDEV_HOME="$sdev" TREEHOUSE_ROOT="$tree" \
+    FM_RETENTION_TODAY=2026-09-07 "$RETENTION")
+  assert_contains "$out" $'REMOVE\tsdev-workspace' "orphan SDev workspace was not previewed"
+  assert_contains "$out" 'orphan-registry-a1' "orphan SDev task identity was lost"
+  assert_contains "$out" 'project=pdmt; clock=' "SDev preview omitted the project and fallback clock"
+  assert_contains "$out" 'fallback' "SDev orphan did not disclose its fallback clock"
+  assert_contains "$out" 'orphan-unlanded-b2' "unlanded orphan workspace was not reported"
+  assert_contains "$out" 'landed-work check refused' "unlanded orphan workspace was not retained"
+  assert_contains "$out" $'SKIP\tnon-task\taiworkshop' "non-task SDev directory was not classified explicitly"
+  pass "orphan SDev workspaces use registry bases and disclosed evidence clocks while non-task directories remain"
+}
+
+test_orphan_treehouse_worktree_uses_its_own_evidence() {
+  local world rec home tree source worktree stray out
+  world="$TMP_ROOT/orphan-treehouse"
+  rec=$(make_world "$world")
+  home=${rec%%|*}
+  tree=${rec#*|}
+  source="$world/orphan-source"
+  worktree="$tree/pool/2/repo"
+  stray="$tree/pool/3/repo"
+  mkdir -p "$tree/pool/2" "$tree/pool/3"
+  fm_git_worktree "$source" "$worktree" fm/orphan-tree-a1
+  git -C "$source" worktree add --quiet -b fm/aiworkshop "$stray"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" SDEV_HOME='' TREEHOUSE_ROOT="$tree" \
+    FM_RETENTION_TODAY=2030-09-07 FM_RETENTION_ATTACHMENT_MIN_BYTES=1024 \
+    FM_RETENTION_MAX_WORKSPACES=10 "$RETENTION")
+  assert_contains "$out" $'REMOVE\ttreehouse-worktree' "orphan treehouse worktree was not previewed"
+  assert_contains "$out" 'orphan-tree-a1' "orphan treehouse task identity was lost"
+  assert_contains "$out" 'base=' "treehouse preview omitted its resolved base"
+  assert_contains "$out" 'fallback' "treehouse orphan did not disclose its fallback clock"
+  assert_contains "$out" $'SKIP\tnon-task\taiworkshop' "non-task treehouse worktree was not classified explicitly"
+  pass "orphan treehouse worktrees use clean, landed, inactive, aged evidence and disclose their clock"
+}
+
 test_preview_uses_closure_age_and_refuses_unlanded_work
 test_apply_prunes_selected_records_but_preserves_briefs_and_protected_files
 test_scheduler_is_hourly_opportunity_with_once_daily_apply_gate
+test_orphan_sdev_workspace_uses_registry_base_and_fallback_clock
+test_orphan_treehouse_worktree_uses_its_own_evidence

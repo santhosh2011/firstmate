@@ -12,6 +12,8 @@
 # FM_LANDED_WORK_NO_FETCH=1 makes remote refresh fail-safe and read-only: current
 # remote-tracking refs may prove work landed, while missing or stale proof retains
 # the workspace.
+# FM_LANDED_WORK_DISCOVER_TASK_BRANCH=1 accepts only task/<id>, fm/<id>, a
+# detached landed commit, or the registered base with both task refs absent.
 
 default_branch() {
   local ref branch
@@ -160,22 +162,22 @@ sdev_repo_dirty() {
 }
 
 sdev_repo_content_in_default() {
-  local wt=$1 base=$2 dtree mtree
+  local wt=$1 base=$2 task_branch=${3:-$SDEV_BRANCH} dtree mtree
   dtree=$(git -C "$wt" rev-parse --quiet --verify "$base^{tree}" 2>/dev/null) || return 1
-  mtree=$(git -C "$wt" merge-tree --write-tree "$base" "$SDEV_BRANCH" 2>/dev/null | head -1) || return 1
+  mtree=$(git -C "$wt" merge-tree --write-tree "$base" "$task_branch" 2>/dev/null | head -1) || return 1
   [ -n "$mtree" ] && [ "$mtree" = "$dtree" ]
 }
 
 sdev_repo_landed() {
-  local key=$1 wt=$2 base=$3 mode=$4
-  git -C "$wt" rev-parse --verify --quiet "refs/heads/$SDEV_BRANCH" >/dev/null 2>&1 || return 0
+  local key=$1 wt=$2 base=$3 mode=$4 task_branch=${5:-$SDEV_BRANCH}
+  git -C "$wt" rev-parse --verify --quiet "$task_branch^{commit}" >/dev/null 2>&1 || return 0
   git -C "$wt" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1 || return 1
-  if git -C "$wt" diff --quiet "$base...$SDEV_BRANCH" -- 2>/dev/null; then return 0; fi
+  if git -C "$wt" diff --quiet "$base...$task_branch" -- 2>/dev/null; then return 0; fi
   if [ -f "$META" ] && grep -q "^landed_$key=" "$META"; then return 0; fi
   if [ "$mode" = local-only ]; then
-    git -C "$wt" merge-base --is-ancestor "$SDEV_BRANCH" "$base" 2>/dev/null
+    git -C "$wt" merge-base --is-ancestor "$task_branch" "$base" 2>/dev/null
   else
-    sdev_repo_content_in_default "$wt" "$base"
+    sdev_repo_content_in_default "$wt" "$base" "$task_branch"
   fi
 }
 
@@ -188,7 +190,7 @@ sdev_teardown_refuse() {
 }
 
 validate_sdev_teardown_safety() {
-  local repos key path base wt base_ref mode dirty="" unlanded="" seen=0 dirty_rc branch
+  local repos key path base wt base_ref mode dirty="" unlanded="" seen=0 dirty_rc branch task_branch candidate found
   repos=$(SDEV_HOME="$SDEV_HOME_DIR" "$SCRIPT_DIR/fm-sdev-registry.sh" repos "$SDEV_PROJ") \
     || { echo "REFUSED: cannot resolve SDev repos for $SDEV_PROJ (SDEV_HOME=$SDEV_HOME_DIR)" >&2; return 1; }
   while IFS=$'\t' read -r key path base _; do
@@ -208,16 +210,37 @@ validate_sdev_teardown_safety() {
         continue
       fi
     fi
-    if [ "${FM_LANDED_WORK_REQUIRE_TASK_BRANCH:-0}" = 1 ]; then
+    task_branch=$SDEV_BRANCH
+    if [ "${FM_LANDED_WORK_DISCOVER_TASK_BRANCH:-0}" = 1 ]; then
       branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-      if [ "$branch" != "$SDEV_BRANCH" ]; then
-        unlanded="$unlanded $key(ownership-unclear)"
-        continue
-      fi
+      case "$branch" in
+        "task/$ID"|"fm/$ID") task_branch=$branch ;;
+        HEAD) task_branch=HEAD ;;
+        "$base")
+          found=0
+          for candidate in "task/$ID" "fm/$ID"; do
+            if git -C "$wt" rev-parse --verify --quiet "refs/heads/$candidate" >/dev/null 2>&1; then
+              found=$((found + 1))
+            fi
+          done
+          if [ "$found" -ne 0 ]; then
+            unlanded="$unlanded $key(ownership-unclear)"
+            continue
+          fi
+          task_branch="refs/heads/__firstmate_absent_task_branch__"
+          ;;
+        *)
+          unlanded="$unlanded $key(ownership-unclear)"
+          continue
+          ;;
+      esac
+    elif [ "${FM_LANDED_WORK_REQUIRE_TASK_BRANCH:-0}" = 1 ] && [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)" != "$SDEV_BRANCH" ]; then
+      unlanded="$unlanded $key(ownership-unclear)"
+      continue
     fi
     base_ref=$(sdev_repo_base "$wt" "$base")
     mode=$("$SCRIPT_DIR/fm-landing-policy.sh" "$SDEV_PROJ" "$key" | cut -d' ' -f1)
-    sdev_repo_landed "$key" "$wt" "$base_ref" "$mode" || unlanded="$unlanded $key"
+    sdev_repo_landed "$key" "$wt" "$base_ref" "$mode" "$task_branch" || unlanded="$unlanded $key"
   done <<EOF
 $repos
 EOF

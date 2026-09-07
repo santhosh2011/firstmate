@@ -19,15 +19,19 @@ Open, queued, blocked, held, unresolved, duplicate, malformed, and persistent-se
 
 ## Safety contract
 
-Closure age comes from the checked task's single `(done YYYY-MM-DD)`, `(reported YYYY-MM-DD)`, or `(merged YYYY-MM-DD)` backlog completion marker, never file modification time.
+Closure age comes from the checked task's single `(done YYYY-MM-DD)`, `(reported YYYY-MM-DD)`, or `(merged YYYY-MM-DD)` backlog completion marker when that record still exists.
 The active backlog and `data/done-archive.md` are both consulted because `tasks-axi` archives older Done rows.
 A task id present in an active section wins as not closed, even if inconsistent historical data also contains it.
 Missing dates, duplicate closed rows, unsafe paths, ambiguous ownership, unreadable metadata, and live recorded endpoints retain every affected artifact and appear as `SKIP` lines.
+When a workspace has aged out of both backlog files, its clock is the newer of its newest file modification time and newest checked-out commit time.
+The preview and audit name `backlog closure`, `newest file mtime`, or `newest commit` for every workspace removal.
+An orphan is considered a Firstmate task only when a durable brief exists or its id has Firstmate's generated task suffix, while other directories are reported as `non-task` and retained.
 
 `bin/fm-landed-work-lib.sh` is the single owner of the dirty and landed-work predicates shared by teardown and retention.
 Retention disables fetching while it evaluates that predicate, so stale local proof can only retain a workspace, never authorize deletion or change repository refs.
+Each SDev repository is compared with the `default_base` declared for that exact repository in the SDev project registry.
 SDev cleanup calls `sdev end --keep-branch`, and treehouse cleanup names one exact worktree to `treehouse destroy --yes` without any risky include flag.
-At most ten workspaces are removed per run so the first apply is bounded and reviewable.
+At most ten SDev workspaces and ten treehouse worktrees are removed per run so the first apply is bounded and reviewable.
 Files belonging to a task whose workspace is retained are also retained, except for independently size-qualified large attachments.
 
 An apply run takes a per-home retention singleton and the same acquisition lock used to publish the session lock.
