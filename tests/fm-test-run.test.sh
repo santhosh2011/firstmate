@@ -452,19 +452,31 @@ if [ "$1" = "-f" ] && [ "$2" = "%Lp" ]; then
 fi
 exit 1
 SH
+  # The slow fixture blocks until it observes the replacement fixture start,
+  # so a scheduler that fails to refill the freed slot deadlocks instead of
+  # racing on wall-clock sleeps (which flakes under CI load). A bounded poll
+  # turns that deadlock into a clean failure instead of a hung test.
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+n=0
+while [ ! -e "$SCHED_EVIDENCE/c-started" ]; do
+  n=$((n + 1))
+  if [ "$n" -gt 100 ]; then
+    echo "not ok - scheduler never refilled the freed slot"
+    exit 1
+  fi
+  sleep 0.1
+done
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
-sleep 0.05
 echo "ok - fast fixture"
 SH
   cat >"$repo/$c" <<'SH'
 #!/usr/bin/env bash
+touch "$SCHED_EVIDENCE/c-started"
 if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
   echo "not ok - scheduler waited for oldest worker"
   exit 1
