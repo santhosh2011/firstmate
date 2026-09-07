@@ -23,6 +23,13 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Closed-task retention window (config/retention-days)
+
+Set the local, gitignored `config/retention-days` file to one positive integer to choose how many complete calendar days closed task workspaces, volatile state, and investigation reports remain eligible for retention.
+An absent file defaults to 15 days.
+An invalid, unreadable, or symlinked file refuses the sweep instead of falling back to a more destructive value.
+[`retention.md`](retention.md) owns the scheduling, deletion categories, safety gates, large-attachment rule, per-run bound, and audit contract.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
