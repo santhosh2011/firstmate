@@ -29,6 +29,7 @@ make_home() {  # <name>
   : > "$dir/stats.tsv"
   : > "$dir/stopped.log"
   : > "$dir/windows.txt"
+  : > "$dir/unreadable.txt"
 
   : > "$dir/volumes.tsv"
   : > "$dir/removed.log"
@@ -113,6 +114,18 @@ SH
 #!/usr/bin/env bash
 case "$1" in
   list-windows)
+    # A session the server will not answer for reads as neither present nor
+    # gone: the inventory fails with an error the adapter cannot classify.
+    session=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = -t ] && session=$arg
+      prev=$arg
+    done
+    if [ -n "$session" ] && grep -Fqx "$session" "${FM_TEST_UNREADABLE:?}"; then
+      echo "lost server" >&2
+      exit 1
+    fi
     cat "${FM_TEST_WINDOWS:?}"
     ;;
   display-message)
@@ -141,14 +154,43 @@ add_volume() {
   printf '%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "${5:-}" >> "$1/volumes.tsv"
 }
 
+# record_task <dir> <id> <worktree> <session>: the durable record a task leaves
+# under state/, without saying anything about whether its endpoint still exists.
+record_task() {
+  local dir=$1 id=$2 wt=$3 session=$4
+  mkdir -p "$wt"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=$session:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$dir/project" "harness=claude" "kind=ship"
+}
+
 # add_live_task <dir> <id> <worktree>: a recorded task whose window exists.
 add_live_task() {
   local dir=$1 id=$2 wt=$3
-  mkdir -p "$wt"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$wt" "project=$dir/project" "harness=claude" "kind=ship"
+  record_task "$dir" "$id" "$wt" firstmate
   printf 'fm-%s\n' "$id" >> "$dir/windows.txt"
+}
+
+# add_finished_task <dir> <id> <worktree>: a task whose record survives but whose
+# window is gone - what a finished, not-yet-cleaned-up task looks like, and what
+# a reissued worktree slot leaves behind beside its current occupant.
+add_finished_task() {
+  record_task "$1" "$2" "$3" firstmate
+}
+
+# add_unreadable_task <dir> <id> <worktree>: a recorded task whose session the
+# server will not answer for, so its endpoint is neither present nor gone.
+add_unreadable_task() {
+  local dir=$1 id=$2 wt=$3
+  record_task "$dir" "$id" "$wt" wedged
+  printf 'wedged\n' >> "$dir/unreadable.txt"
+}
+
+# record_written_at <dir> <id> <touch-stamp>: pin when a task's record was
+# written, so "the slot's current occupant" is decided by the fixture rather
+# than by how fast the test ran.
+record_written_at() {
+  touch -t "$3" "$1/home/state/$2.meta"
 }
 
 run_sweep() {  # <dir> [args...]
@@ -157,6 +199,7 @@ run_sweep() {  # <dir> [args...]
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_TEST_CONTAINERS="$dir/containers.tsv" FM_TEST_STATS="$dir/stats.tsv" \
   FM_TEST_STOPPED="$dir/stopped.log" FM_TEST_WINDOWS="$dir/windows.txt" \
+  FM_TEST_UNREADABLE="$dir/unreadable.txt" \
   FM_TEST_VOLUMES="$dir/volumes.tsv" FM_TEST_REMOVED="$dir/removed.log" \
   FM_TEST_REMOVED_VOLUMES="$dir/removed-volumes.log" \
   FM_TEST_CMDLOG="$dir/cmd.log" \
@@ -402,6 +445,146 @@ SH
   pass "an unreadable docker is a blocker, not an empty sweep"
 }
 
+# --- reused worktree slots --------------------------------------------------
+#
+# A treehouse worktree slot is handed back and reissued, so the same directory,
+# and the compose project name derived from it, appear in the records of every
+# task that has held it. Attribution therefore names a SET of tasks, and a set
+# containing one live task is a live stack however many finished records sit
+# beside it. Getting this wrong stops the environment the captain is testing in.
+
+test_reused_slot_with_a_live_occupant_is_live() {
+  local dir out slot
+  dir=$(make_home reuse-live)
+  slot="$dir/pool/3/repo"
+  # Same slot, two records: a finished task that has not been cleaned up yet,
+  # and the session running in it now.
+  add_finished_task "$dir" a-finished-task "$slot"
+  add_live_task "$dir" z-live-session "$slot"
+  record_written_at "$dir" a-finished-task 202401010900
+  record_written_at "$dir" z-live-session 202401020900
+  add_container "$dir" c-live-1 live-stack "$slot"
+  add_container "$dir" c-live-2 live-stack "$slot"
+  add_container "$dir" c-live-3 live-stack "$slot"
+  add_volume "$dir" live-stack_db live-stack 2GB
+
+  out=$(run_sweep "$dir")
+  assert_contains "$out" "live      live-stack" "a reused slot's live stack was not reported as live"
+  assert_contains "$out" "z-live-session" "the live occupant was not the task the stack was reported under"
+  assert_not_contains "$out" "ORPHANED" "a live session's stack was classified as orphaned by a stale record of the same slot"
+
+  [ ! -s "$dir/stopped.log" ] \
+    || fail "a live session's stack was stopped: $(cat "$dir/stopped.log")"
+  [ ! -s "$dir/removed.log" ] \
+    || fail "a live session's containers were removed: $(cat "$dir/removed.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "a live session's volumes were removed: $(cat "$dir/removed-volumes.log")"
+  pass "a stale record of a reused slot cannot make its live stack orphaned"
+}
+
+test_reused_slot_with_an_unreadable_claimant_is_left_alone() {
+  local dir out slot
+  dir=$(make_home reuse-unreadable)
+  slot="$dir/pool/4/repo"
+  # Nothing here is live, but one claimant cannot be read at all, so the set
+  # cannot be settled and the stack is reported rather than cleaned.
+  add_finished_task "$dir" a-finished-task "$slot"
+  add_finished_task "$dir" b-finished-task "$slot"
+  add_unreadable_task "$dir" c-wedged-task "$slot"
+  add_container "$dir" c-amb-1 amb-stack "$slot"
+  add_volume "$dir" amb-stack_db amb-stack 2GB
+
+  out=$(run_sweep "$dir")
+  assert_contains "$out" "left      amb-stack" "an unsettled stack was not reported as left alone"
+  assert_contains "$out" "could not be read" "an unsettled stack gave no reason"
+  assert_not_contains "$out" "ORPHANED" "an unreadable claimant resolved toward removal"
+
+  [ ! -s "$dir/stopped.log" ] \
+    || fail "an unsettled stack was stopped: $(cat "$dir/stopped.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "an unsettled stack's volumes were removed: $(cat "$dir/removed-volumes.log")"
+  pass "a claimant that cannot be read leaves the stack alone"
+}
+
+test_reused_slot_is_orphaned_only_when_every_claimant_is_gone() {
+  local dir out slot
+  dir=$(make_home reuse-gone)
+  slot="$dir/pool/5/repo"
+  add_finished_task "$dir" z-older-task "$slot"
+  add_finished_task "$dir" a-newer-task "$slot"
+  record_written_at "$dir" z-older-task 202401010900
+  record_written_at "$dir" a-newer-task 202401020900
+  add_container "$dir" c-gone-1 gone-stack "$slot"
+
+  out=$(run_sweep "$dir" --dry-run)
+  assert_contains "$out" "ORPHANED  gone-stack" "a slot whose every claimant is gone was not reported as orphaned"
+  # Reported under the slot's last occupant, not a predecessor of it.
+  assert_contains "$out" "task a-newer-task is recorded" "the orphaned stack was reported under an older occupant of the slot"
+  assert_contains "$out" "2 tasks claiming this stack" "the report did not say the whole claiming set was gone"
+  pass "a reused slot is orphaned only when every task claiming it is gone"
+}
+
+test_stack_composed_from_an_ancestor_of_the_pool_is_left_alone() {
+  local dir out
+  dir=$(make_home ancestor)
+  # Reading containment upward stops at this home's task-worktree roots. A stack
+  # composed from some broad ancestor of them claims no task at all, rather than
+  # claiming every task recorded here and being cleaned once they are all gone.
+  add_finished_task "$dir" a-finished-task "$dir/pool/3/repo"
+  add_container "$dir" c-broad-1 broad-stack "$dir"
+  add_volume "$dir" broad-stack_db broad-stack 2GB
+
+  out=$(run_sweep "$dir")
+  assert_not_contains "$out" "ORPHANED" "a stack composed from a broad ancestor was claimed by a finished task"
+  [ ! -s "$dir/stopped.log" ] \
+    || fail "a stack composed from a broad ancestor was stopped: $(cat "$dir/stopped.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "a broad ancestor stack's volumes were removed: $(cat "$dir/removed-volumes.log")"
+  pass "reading containment upward stops at this home's task-worktree roots"
+}
+
+test_reused_project_name_with_a_live_occupant_is_live() {
+  local dir out
+  dir=$(make_home reuse-name)
+  # Name attribution has the same blindness as path attribution: a reissued slot
+  # hands the same basename, and so the same compose project name, to every task
+  # that has held it. This stack was composed from somewhere else entirely, so
+  # only the name can attribute it.
+  add_finished_task "$dir" a-finished-task "$dir/pool/1/edm-obs"
+  add_live_task "$dir" z-live-session "$dir/pool/2/edm-obs"
+  add_container "$dir" c-name-1 edm-obs /opt/elsewhere
+  add_volume "$dir" edm-obs_db edm-obs 2GB
+
+  out=$(run_sweep "$dir")
+  assert_contains "$out" "live      edm-obs" "a stack named for a reused slot was not reported as live"
+  assert_not_contains "$out" "ORPHANED" "a live session's stack was classified as orphaned by name"
+  [ ! -s "$dir/stopped.log" ] \
+    || fail "a live session's stack was stopped: $(cat "$dir/stopped.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "a live session's volumes were removed: $(cat "$dir/removed-volumes.log")"
+  pass "a compose project name shared by a reused slot resolves to its live occupant"
+}
+
+test_stack_composed_from_a_directory_holding_a_live_worktree_is_live() {
+  local dir out
+  dir=$(make_home containing-dir)
+  # An SDev workspace holds several repo worktrees, and the stack is composed
+  # from the workspace directory itself. Containment runs the other way here,
+  # but the task is no less live for it.
+  add_live_task "$dir" busy-task "$dir/workspace/repo-a"
+  add_container "$dir" c-ws-1 workspace-app "$dir/workspace"
+  add_volume "$dir" workspace-app_db workspace-app 2GB
+
+  out=$(run_sweep "$dir")
+  assert_contains "$out" "live      workspace-app" "a stack composed from a directory holding a live worktree was not live"
+  assert_not_contains "$out" "ORPHANED" "a stack holding a live task's worktree was classified as orphaned"
+  [ ! -s "$dir/stopped.log" ] \
+    || fail "a live workspace's stack was stopped: $(cat "$dir/stopped.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "a live workspace's volumes were removed: $(cat "$dir/removed-volumes.log")"
+  pass "a stack composed from a directory holding a live worktree is live"
+}
+
 test_orphaned_stack_is_cleaned_by_default
 test_retired_task_stack_is_identified
 test_live_task_stack_is_never_touched
@@ -414,3 +597,9 @@ test_orphan_stack_volume_is_not_also_counted_as_unattributed
 test_unattributed_volumes_removed_only_on_request
 test_no_go_path_stack_is_protected
 test_unreadable_docker_is_a_blocker
+test_reused_slot_with_a_live_occupant_is_live
+test_reused_slot_with_an_unreadable_claimant_is_left_alone
+test_reused_slot_is_orphaned_only_when_every_claimant_is_gone
+test_reused_project_name_with_a_live_occupant_is_live
+test_stack_composed_from_a_directory_holding_a_live_worktree_is_live
+test_stack_composed_from_an_ancestor_of_the_pool_is_left_alone
