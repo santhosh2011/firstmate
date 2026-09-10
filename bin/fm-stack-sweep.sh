@@ -1,58 +1,54 @@
 #!/usr/bin/env bash
-# fm-stack-sweep.sh - find, and optionally stop, app stacks that outlived the
-# task that started them.
+# fm-stack-sweep.sh - reclaim the machine from app stacks that outlived the task
+# that started them.
 #
 # Cleanup returns a task's worktree and retires its records, but it never stops
 # what the task's own code started. A task that brought a docker stack up leaves
-# that stack running after the work is merged and the task is gone, so the
-# containers accumulate silently across a working day until the box is out of
-# memory and the captain's review surfaces start dying. Recovering by hand means
-# re-deriving, every single time, which of the running stacks are still backing
-# live work and which are debris - which is exactly the judgement this script
-# exists to record once, so the captain can re-run it instead of re-reasoning it.
+# that stack running, and its disk allocated, after the work is merged and the
+# task is gone. That accumulates silently across a working day until the box is
+# out of memory and the captain's review surfaces start dying. Recovering by
+# hand means re-deriving, every single time, which of the running stacks are
+# still backing live work and which are debris - which is exactly the judgement
+# this script exists to record once, so the captain can re-run it instead of
+# re-reasoning it.
+#
+# Cleaning is the primary action, not an opt-in. For every stack this run
+# positively attributes as orphaned, a normal invocation stops it, removes its
+# containers, removes the volumes docker records as belonging to it, and reports
+# the space reclaimed per stack and in total. Stopping alone would leave the
+# disk allocated, which is most of what the captain needed back. Use --dry-run
+# to look without acting.
 #
 # Attribution is deliberately one-directional. A stack is acted on only on
 # positive evidence that it belongs to THIS home and that its task is gone;
 # every stack that cannot be attributed that confidently is reported and left
-# alone. Guessing wrong in the other direction means killing the environment the
-# captain is testing in, which is the failure that actually costs him work.
+# alone. Guessing wrong in the other direction means destroying the environment
+# the captain is testing in, which is the failure that actually costs him work.
 #
-# Three escalating modes, each one the captain has to type for himself:
+# Three boundaries do not move:
 #
-#   fm-stack-sweep.sh
-#     Report only. Changes nothing at all. Lists every running stack, how it was
-#     attributed, its memory, and the disk its volumes hold.
-#
-#   fm-stack-sweep.sh --stop
-#     Stops the containers of the orphaned stacks, and only those. Removes
-#     nothing, so every stack stopped here comes back with `docker start`.
-#
-#   fm-stack-sweep.sh --stop --remove-volumes
-#     The one destructive path, and the only one that can lose data. It reclaims
-#     the disk held by the orphaned stacks' volumes. Docker will not release a
-#     volume while any container still references it, so this necessarily also
-#     removes those same orphaned stacks' own containers - stopping them is not
-#     enough. It is refused without --stop precisely so the destructive mode
-#     cannot be reached by adding one flag to a habit.
-#
-# A volume is removed only when it carries the compose project label of a stack
-# this run attributed as orphaned. Volumes belonging to a live, unknown or
-# protected stack are excluded by that filter and then checked a second time
-# against the live set before any removal, because "never destroy the captain's
-# running environment" is worth paying for twice. Removal is never forced: a
-# volume docker still considers in use is reported and left.
+#   1. Nothing belonging to a live task is ever touched. A recorded task counts
+#      as live unless its endpoint is authoritatively absent, so an ambiguous or
+#      unreadable answer keeps the stack.
+#   2. Removal is always targeted by name, one container or volume at a time,
+#      derived from the stack it was attributed to. This script never runs a
+#      blanket sweep - no `docker volume prune`, no `docker system prune`, no
+#      `-a --volumes` - because a blanket prune can unrecoverably destroy the
+#      data of unrelated projects that happen to share this machine.
+#   3. Unattributable means untouched. Volumes that belong to no stack this run
+#      classified are reported separately with their size and are removed only
+#      under --remove-dangling-volumes, which the captain has to type.
 #
 # Usage:
-#   fm-stack-sweep.sh                       report; change nothing
-#   fm-stack-sweep.sh --stop                stop the orphaned stacks
-#   fm-stack-sweep.sh --stop --remove-volumes
-#                                           also remove those stacks' containers
-#                                           and volumes to reclaim their disk
-#   fm-stack-sweep.sh --help                print this usage
+#   fm-stack-sweep.sh              clean the orphaned stacks and report the space
+#   fm-stack-sweep.sh --dry-run    report only; change nothing
+#   fm-stack-sweep.sh --remove-dangling-volumes
+#                                  also remove the reported unattributed volumes
+#   fm-stack-sweep.sh --help       print this usage
 #
 # Exit status: 0 when the sweep completed, 1 when docker is unavailable, when
-# the declared no-go paths could not be read, or when a requested stop or
-# removal failed. An unreadable boundary is never reported as an empty sweep.
+# the declared no-go paths could not be read, or when a removal failed. An
+# unreadable boundary is never reported as an empty sweep.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,20 +76,16 @@ die() {
   exit 1
 }
 
-STOP=0
-REMOVE_VOLUMES=0
+DRY_RUN=0
+REMOVE_DANGLING=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --stop) STOP=1; shift ;;
-    --remove-volumes) REMOVE_VOLUMES=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --remove-dangling-volumes) REMOVE_DANGLING=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (try --help)" ;;
   esac
 done
-
-if [ "$REMOVE_VOLUMES" -eq 1 ] && [ "$STOP" -eq 0 ]; then
-  die "--remove-volumes requires --stop; docker cannot release a volume while its stack is running, and the destructive mode is deliberately two typed flags"
-fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-stack-sweep.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -212,6 +204,14 @@ lookup_bytes() {  # <key> <table>
 stack_volumes() {  # <stack>
   docker volume ls --filter "label=com.docker.compose.project=$1" --format '{{.Name}}' 2>/dev/null || true
 }
+
+# Volumes no container references at all, captured before this run changes
+# anything so the orphaned stacks' own volumes are not swept in here by the
+# removals below. These are enumerated to be reported and removed BY NAME; the
+# prune subcommand that would do this in one blanket call is deliberately never
+# used, because it cannot distinguish this machine's unrelated projects.
+docker volume ls --filter dangling=true --format '{{.Name}}' > "$TMP/dangling-raw" 2>/dev/null \
+  || : > "$TMP/dangling-raw"
 
 # --- this home's task records ----------------------------------------------
 #
@@ -379,9 +379,9 @@ ORPHAN_VOLUMES=0
 ORPHAN_VOL_BYTES=0
 LIVE_STACKS=0
 UNKNOWN_STACKS=0
-: > "$TMP/orphan-ids"
-: > "$TMP/orphan-volumes"
+: > "$TMP/orphan-plan"
 : > "$TMP/kept-volumes"
+: > "$TMP/planned-volumes"
 
 printf 'Running stacks (home: %s)\n\n' "$FM_HOME"
 
@@ -449,8 +449,13 @@ while IFS= read -r stack; do
       ORPHAN_MEM=$((ORPHAN_MEM + mem))
       ORPHAN_VOLUMES=$((ORPHAN_VOLUMES + vol_count))
       ORPHAN_VOL_BYTES=$((ORPHAN_VOL_BYTES + vol_bytes))
-      printf '%s\n' "$ids" | grep . >> "$TMP/orphan-ids" || true
-      printf '%s\n' "$volumes" | grep . >> "$TMP/orphan-volumes" || true
+      # One planned stack per line: name, then its containers and volumes as
+      # space-separated fields, so the acting pass below removes exactly the set
+      # that was attributed and reported here.
+      printf '%s\t%s\t%s\n' "$stack" \
+        "$(printf '%s' "$ids" | tr '\n' ' ')" \
+        "$(printf '%s' "$volumes" | tr '\n' ' ')" >> "$TMP/orphan-plan"
+      printf '%s\n' "$volumes" | grep . >> "$TMP/planned-volumes" || true
       printf '  ORPHANED  %-28s %2d container(s)  %8s%s  %s\n' \
         "$stack" "$count" "$(human_bytes "$mem")" "$vol_note" "$detail"
       ;;
@@ -479,6 +484,48 @@ if [ "$TOTAL_CONTAINERS" -eq 0 ]; then
   printf '  (no running containers)\n'
 fi
 
+# --- unattributed dangling volumes -----------------------------------------
+#
+# A dangling volume that any classified stack claims is not unattributed - not
+# the ones an orphaned stack is already scheduled to free, which would otherwise
+# be counted and attempted twice, and not the ones a kept stack owns. A volume
+# whose own compose label resolves to a live task is never a candidate however
+# unreferenced docker thinks it is.
+
+: > "$TMP/dangling"
+DANGLING_COUNT=0
+DANGLING_BYTES=0
+while IFS= read -r vol; do
+  [ -n "$vol" ] || continue
+  grep -Fqx "$vol" "$TMP/kept-volumes" 2>/dev/null && continue
+  grep -Fqx "$vol" "$TMP/planned-volumes" 2>/dev/null && continue
+  project=$(docker volume inspect "$vol" \
+    --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null || true)
+  case "$project" in
+    ''|'<no value>') ;;
+    *)
+      owner=$(task_owning_name "$project")
+      if [ -n "$owner" ] && ! task_endpoint_absent "$owner"; then
+        continue
+      fi
+      ;;
+  esac
+  printf '%s\n' "$vol" >> "$TMP/dangling"
+  DANGLING_COUNT=$((DANGLING_COUNT + 1))
+  DANGLING_BYTES=$((DANGLING_BYTES + $(lookup_bytes "$vol" "$VOLSIZES")))
+done < "$TMP/dangling-raw"
+
+if [ "$DANGLING_COUNT" -gt 0 ]; then
+  printf '\nUnattributed volumes (belong to no stack running now):\n'
+  while IFS= read -r vol; do
+    [ -n "$vol" ] || continue
+    printf '  %-52s %8s\n' "$vol" "$(human_bytes "$(lookup_bytes "$vol" "$VOLSIZES")")"
+  done < "$TMP/dangling"
+  printf '  %d volume(s) holding %s.\n' "$DANGLING_COUNT" "$(human_bytes "$DANGLING_BYTES")"
+  [ "$REMOVE_DANGLING" -eq 1 ] \
+    || printf '  Left alone. Pass --remove-dangling-volumes to reclaim them.\n'
+fi
+
 printf '\n%d container(s) running in %d stack(s)' \
   "$TOTAL_CONTAINERS" "$(awk 'END { print NR + 0 }' "$STACKS")"
 [ "$LOOSE_CONTAINERS" -eq 0 ] || printf ', plus %d outside any stack' "$LOOSE_CONTAINERS"
@@ -492,97 +539,91 @@ if [ -n "$pressure" ]; then
     "$(human_bytes "${pressure%% *}")" "$(human_bytes "${pressure##* }")"
 fi
 
-if [ "$ORPHAN_STACKS" -eq 0 ]; then
-  printf 'Nothing to stop.\n'
-  exit 0
-fi
-
-if [ "$STOP" -eq 0 ]; then
-  printf 'Would stop %d container(s) holding %s.\n' \
-    "$ORPHAN_CONTAINERS" "$(human_bytes "$ORPHAN_MEM")"
-  if [ "$ORPHAN_VOLUMES" -gt 0 ]; then
-    printf 'Their %d volume(s) hold %s on disk, which --stop alone does NOT reclaim.\n' \
-      "$ORPHAN_VOLUMES" "$(human_bytes "$ORPHAN_VOL_BYTES")"
-    printf 'Re-run with --stop, or --stop --remove-volumes to also reclaim that disk.\n'
+if [ "$DRY_RUN" -eq 1 ]; then
+  if [ "$ORPHAN_STACKS" -eq 0 ]; then
+    printf 'Nothing to clean.\n'
   else
-    printf 'Re-run with --stop to do it.\n'
-  fi
-  exit 0
-fi
-
-# Stop exactly the containers listed above, by id, and nothing else.
-printf '\nStopping %d container(s)...\n' "$ORPHAN_CONTAINERS"
-STOP_FAILED=0
-while IFS= read -r cid; do
-  [ -n "$cid" ] || continue
-  if docker stop "$cid" >/dev/null 2>"$TMP/stop.err"; then
-    printf '  stopped %s\n' "${cid:0:12}"
-  else
-    STOP_FAILED=$((STOP_FAILED + 1))
-    printf '  FAILED  %s: %s\n' "${cid:0:12}" "$(tr '\n' ' ' < "$TMP/stop.err")" >&2
-  fi
-done < "$TMP/orphan-ids"
-
-if [ "$REMOVE_VOLUMES" -eq 0 ]; then
-  if [ "$STOP_FAILED" -gt 0 ]; then
-    printf 'Stopped %d of %d container(s); %d could not be stopped.\n' \
-      "$((ORPHAN_CONTAINERS - STOP_FAILED))" "$ORPHAN_CONTAINERS" "$STOP_FAILED"
-    exit 1
-  fi
-  printf 'Stopped %d container(s), releasing %s.\n' \
-    "$ORPHAN_CONTAINERS" "$(human_bytes "$ORPHAN_MEM")"
-  if [ "$ORPHAN_VOLUMES" -gt 0 ]; then
-    printf 'Left %d volume(s) holding %s; --stop --remove-volumes reclaims that disk.\n' \
+    printf 'Would clean %d stack(s): stop and remove %d container(s) holding %s, and remove %d volume(s) holding %s.\n' \
+      "$ORPHAN_STACKS" "$ORPHAN_CONTAINERS" "$(human_bytes "$ORPHAN_MEM")" \
       "$ORPHAN_VOLUMES" "$(human_bytes "$ORPHAN_VOL_BYTES")"
   fi
+  [ "$DANGLING_COUNT" -eq 0 ] || [ "$REMOVE_DANGLING" -eq 0 ] \
+    || printf 'Would also remove %d unattributed volume(s) holding %s.\n' \
+      "$DANGLING_COUNT" "$(human_bytes "$DANGLING_BYTES")"
   exit 0
 fi
 
-# --- destructive path -------------------------------------------------------
+if [ "$ORPHAN_STACKS" -eq 0 ] && { [ "$DANGLING_COUNT" -eq 0 ] || [ "$REMOVE_DANGLING" -eq 0 ]; }; then
+  printf 'Nothing to clean.\n'
+  exit 0
+fi
+
+# --- clean ------------------------------------------------------------------
 #
-# Only reachable with both flags typed. The containers removed here are the
-# exact ids stopped above; the volumes are the exact names the report listed,
-# re-checked against every volume belonging to a stack this run did NOT
-# attribute as orphaned.
+# Every removal below names one exact container or volume taken from the plan
+# printed above. Nothing is inferred here, and no prune subcommand is used.
 
-printf '\nRemoving %d orphaned container(s) so their volumes can be released...\n' \
-  "$ORPHAN_CONTAINERS"
-RM_FAILED=0
-while IFS= read -r cid; do
-  [ -n "$cid" ] || continue
-  docker rm "$cid" >/dev/null 2>"$TMP/rm.err" || {
-    RM_FAILED=$((RM_FAILED + 1))
-    printf '  FAILED  %s: %s\n' "${cid:0:12}" "$(tr '\n' ' ' < "$TMP/rm.err")" >&2
-  }
-done < "$TMP/orphan-ids"
+FAILED=0
+RECLAIMED_DISK=0
 
-printf 'Removing %d volume(s) holding %s...\n' \
-  "$ORPHAN_VOLUMES" "$(human_bytes "$ORPHAN_VOL_BYTES")"
-RECLAIMED=0
-VOL_FAILED=0
-while IFS= read -r vol; do
-  [ -n "$vol" ] || continue
-  # Second, independent check: a volume that any non-orphaned stack claims is
-  # never removed, whatever the label filter returned.
+remove_volume() {  # <volume> <label>
+  local vol=$1 label=$2 bytes
+  # Second, independent check: a volume any non-orphaned stack claims is never
+  # removed, whatever the earlier filter returned.
   if grep -Fqx "$vol" "$TMP/kept-volumes" 2>/dev/null; then
-    printf '  kept    %s (claimed by a stack that is not orphaned)\n' "$vol"
-    continue
+    printf '    kept    %s (claimed by a stack that is not orphaned)\n' "$vol"
+    return 0
   fi
   bytes=$(lookup_bytes "$vol" "$VOLSIZES")
-  if docker volume rm "$vol" >/dev/null 2>"$TMP/vol.err"; then
-    RECLAIMED=$((RECLAIMED + bytes))
-    printf '  removed %-44s %8s\n' "$vol" "$(human_bytes "$bytes")"
+  if docker volume rm "$vol" >/dev/null 2>"$TMP/err"; then
+    RECLAIMED_DISK=$((RECLAIMED_DISK + bytes))
+    printf '    removed volume %-40s %8s\n' "$vol" "$(human_bytes "$bytes")"
   else
-    VOL_FAILED=$((VOL_FAILED + 1))
-    printf '  FAILED  %s: %s\n' "$vol" "$(tr '\n' ' ' < "$TMP/vol.err")" >&2
+    FAILED=$((FAILED + 1))
+    printf '    FAILED  %s volume %s: %s\n' "$label" "$vol" "$(tr '\n' ' ' < "$TMP/err")" >&2
   fi
-done < "$TMP/orphan-volumes"
+}
 
-printf 'Reclaimed %s on disk and %s of memory across %d stack(s).\n' \
-  "$(human_bytes "$RECLAIMED")" "$(human_bytes "$ORPHAN_MEM")" "$ORPHAN_STACKS"
+if [ "$ORPHAN_STACKS" -gt 0 ]; then
+  printf '\nCleaning %d orphaned stack(s)...\n' "$ORPHAN_STACKS"
+  while IFS=$'\t' read -r stack ids volumes; do
+    [ -n "$stack" ] || continue
+    printf '  %s\n' "$stack"
+    stack_disk_before=$RECLAIMED_DISK
+    for cid in $ids; do
+      docker stop "$cid" >/dev/null 2>"$TMP/err" || {
+        FAILED=$((FAILED + 1))
+        printf '    FAILED  stop %s: %s\n' "${cid:0:12}" "$(tr '\n' ' ' < "$TMP/err")" >&2
+        continue
+      }
+      # Removing the container is what actually releases its volumes; docker
+      # refuses to remove a volume any container still references.
+      if docker rm "$cid" >/dev/null 2>"$TMP/err"; then
+        printf '    removed container %s\n' "${cid:0:12}"
+      else
+        FAILED=$((FAILED + 1))
+        printf '    FAILED  remove %s: %s\n' "${cid:0:12}" "$(tr '\n' ' ' < "$TMP/err")" >&2
+      fi
+    done
+    for vol in $volumes; do
+      remove_volume "$vol" "$stack"
+    done
+    printf '    reclaimed %s\n' "$(human_bytes "$((RECLAIMED_DISK - stack_disk_before))")"
+  done < "$TMP/orphan-plan"
+fi
 
-if [ "$STOP_FAILED" -gt 0 ] || [ "$RM_FAILED" -gt 0 ] || [ "$VOL_FAILED" -gt 0 ]; then
-  printf '%d container(s) could not be stopped, %d could not be removed, %d volume(s) could not be removed.\n' \
-    "$STOP_FAILED" "$RM_FAILED" "$VOL_FAILED" >&2
+if [ "$REMOVE_DANGLING" -eq 1 ] && [ "$DANGLING_COUNT" -gt 0 ]; then
+  printf '\nRemoving %d unattributed volume(s)...\n' "$DANGLING_COUNT"
+  while IFS= read -r vol; do
+    [ -n "$vol" ] || continue
+    remove_volume "$vol" unattributed
+  done < "$TMP/dangling"
+fi
+
+printf '\nReclaimed %s on disk and %s of memory across %d stack(s).\n' \
+  "$(human_bytes "$RECLAIMED_DISK")" "$(human_bytes "$ORPHAN_MEM")" "$ORPHAN_STACKS"
+
+if [ "$FAILED" -gt 0 ]; then
+  printf '%d removal(s) failed; nothing was forced.\n' "$FAILED" >&2
   exit 1
 fi

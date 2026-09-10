@@ -94,7 +94,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
-| `fm-stack-sweep.sh`      | Report, and with `--stop` stop, running app stacks whose task is gone; reclaims their disk only under the opt-in `--stop --remove-volumes` |
+| `fm-stack-sweep.sh`      | Stop, remove and free app stacks whose task is gone, reporting space reclaimed; `--dry-run` to look, opt-in flag for unattributed volumes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
