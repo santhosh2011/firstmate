@@ -11,26 +11,48 @@
 # live work and which are debris - which is exactly the judgement this script
 # exists to record once, so the captain can re-run it instead of re-reasoning it.
 #
-# The sweep reports by default and changes nothing. `--stop` stops the stacks it
-# just attributed as orphaned, and stops only those. It never removes a
-# container, image, volume or network: everything this script does is a `docker
-# start` away from being undone, because a sweep that can destroy data is a
-# sweep nobody can safely run while working.
-#
-# Attribution is deliberately one-directional. A stack is stopped only on
+# Attribution is deliberately one-directional. A stack is acted on only on
 # positive evidence that it belongs to THIS home and that its task is gone;
 # every stack that cannot be attributed that confidently is reported and left
 # alone. Guessing wrong in the other direction means killing the environment the
 # captain is testing in, which is the failure that actually costs him work.
 #
-# Usage:
-#   fm-stack-sweep.sh            report what is running and what would be stopped
-#   fm-stack-sweep.sh --stop     stop the stacks reported as orphaned
-#   fm-stack-sweep.sh --help     print this usage
+# Three escalating modes, each one the captain has to type for himself:
 #
-# Exit status: 0 when the sweep completed, 1 when docker is unavailable or the
-# declared no-go paths could not be read. An unreadable boundary is never
-# reported as an empty sweep.
+#   fm-stack-sweep.sh
+#     Report only. Changes nothing at all. Lists every running stack, how it was
+#     attributed, its memory, and the disk its volumes hold.
+#
+#   fm-stack-sweep.sh --stop
+#     Stops the containers of the orphaned stacks, and only those. Removes
+#     nothing, so every stack stopped here comes back with `docker start`.
+#
+#   fm-stack-sweep.sh --stop --remove-volumes
+#     The one destructive path, and the only one that can lose data. It reclaims
+#     the disk held by the orphaned stacks' volumes. Docker will not release a
+#     volume while any container still references it, so this necessarily also
+#     removes those same orphaned stacks' own containers - stopping them is not
+#     enough. It is refused without --stop precisely so the destructive mode
+#     cannot be reached by adding one flag to a habit.
+#
+# A volume is removed only when it carries the compose project label of a stack
+# this run attributed as orphaned. Volumes belonging to a live, unknown or
+# protected stack are excluded by that filter and then checked a second time
+# against the live set before any removal, because "never destroy the captain's
+# running environment" is worth paying for twice. Removal is never forced: a
+# volume docker still considers in use is reported and left.
+#
+# Usage:
+#   fm-stack-sweep.sh                       report; change nothing
+#   fm-stack-sweep.sh --stop                stop the orphaned stacks
+#   fm-stack-sweep.sh --stop --remove-volumes
+#                                           also remove those stacks' containers
+#                                           and volumes to reclaim their disk
+#   fm-stack-sweep.sh --help                print this usage
+#
+# Exit status: 0 when the sweep completed, 1 when docker is unavailable, when
+# the declared no-go paths could not be read, or when a requested stop or
+# removal failed. An unreadable boundary is never reported as an empty sweep.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,8 +67,12 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-no-go-lib.sh
 . "$SCRIPT_DIR/fm-no-go-lib.sh"
 
+# Print the header comment block, which is this script's authoritative
+# description. Reading to the first non-comment line keeps help correct when the
+# header grows instead of drifting against a hard-coded range.
 usage() {
-  sed -n '2,32p' "$SCRIPT_DIR/fm-stack-sweep.sh" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' \
+    "$SCRIPT_DIR/fm-stack-sweep.sh"
 }
 
 die() {
@@ -55,13 +81,19 @@ die() {
 }
 
 STOP=0
+REMOVE_VOLUMES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stop) STOP=1; shift ;;
+    --remove-volumes) REMOVE_VOLUMES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (try --help)" ;;
   esac
 done
+
+if [ "$REMOVE_VOLUMES" -eq 1 ] && [ "$STOP" -eq 0 ]; then
+  die "--remove-volumes requires --stop; docker cannot release a volume while its stack is running, and the destructive mode is deliberately two typed flags"
+fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-stack-sweep.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -69,13 +101,35 @@ trap 'rm -rf "$TMP"' EXIT
 CONTAINERS="$TMP/containers"
 STACKS="$TMP/stacks"
 MEM="$TMP/mem"
+VOLSIZES="$TMP/volsizes"
 
-# --- host pressure ----------------------------------------------------------
+# --- units ------------------------------------------------------------------
 #
-# The captain's question after a sweep is "was that worth running", so the
-# report has to carry the number that made him run it. Both readings are
-# best-effort: an unreadable host statistic degrades to a quieter report, never
-# to a failed sweep.
+# Docker reports SI units from `system df` (kB/MB/GB) and IEC units from `stats`
+# (KiB/MiB/GiB). Both are parsed here so the two readings can be summed and
+# reported in one consistent unit.
+
+size_to_bytes() {  # <docker-size-string>
+  awk -v s="$1" 'BEGIN {
+    v = s
+    sub(/ *\/.*$/, "", v)
+    gsub(/ /, "", v)
+    unit = v
+    sub(/^[0-9.]+/, "", unit)
+    sub(/[A-Za-z]+$/, "", v)
+    if (v == "") { print 0; exit }
+    mult = 1
+    if (unit == "kB" || unit == "KB") mult = 1000
+    else if (unit == "MB") mult = 1000000
+    else if (unit == "GB") mult = 1000000000
+    else if (unit == "TB") mult = 1000000000000
+    else if (unit == "KiB") mult = 1024
+    else if (unit == "MiB") mult = 1048576
+    else if (unit == "GiB") mult = 1073741824
+    else if (unit == "TiB") mult = 1099511627776
+    printf "%d", v * mult
+  }'
+}
 
 human_bytes() {  # <bytes>
   local b=${1:-0}
@@ -87,6 +141,13 @@ human_bytes() {  # <bytes>
     awk -v b="$b" 'BEGIN { printf "%.0fKiB", b / 1024 }'
   fi
 }
+
+# --- host pressure ----------------------------------------------------------
+#
+# The captain's question after a sweep is "was that worth running", so the
+# report has to carry the number that made him run it. Both readings are
+# best-effort: an unreadable host statistic degrades to a quieter report, never
+# to a failed sweep.
 
 # Echo "<free-bytes> <swap-used-bytes>", or nothing when the host cannot be read.
 host_pressure() {
@@ -132,23 +193,24 @@ fi
 : > "$MEM"
 docker stats --no-stream --no-trunc --format '{{.ID}}	{{.MemUsage}}' > "$MEM" 2>/dev/null || : > "$MEM"
 
-# MemUsage reads "12.5MiB / 7.66GiB"; only the used side is ours to report.
-container_mem_bytes() {  # <container-id>
-  awk -F'\t' -v id="$1" '
-    $1 == id {
-      split($2, parts, " / ")
-      v = parts[1]
-      unit = v
-      sub(/^[0-9.]+/, "", unit)
-      sub(/[A-Za-z]+$/, "", v)
-      mult = 1
-      if (unit == "KiB" || unit == "kB") mult = 1024
-      else if (unit == "MiB" || unit == "MB") mult = 1048576
-      else if (unit == "GiB" || unit == "GB") mult = 1073741824
-      printf "%d", v * mult
-      exit
-    }
-  ' "$MEM"
+# Per-volume disk usage, keyed by volume name. Also optional: without it the
+# sweep still targets exactly the same volumes, it just cannot price them.
+: > "$VOLSIZES"
+docker system df -v --format '{{range .Volumes}}{{.Name}}	{{.Size}}
+{{end}}' > "$VOLSIZES" 2>/dev/null || : > "$VOLSIZES"
+
+lookup_bytes() {  # <key> <table>
+  local raw
+  raw=$(awk -F'\t' -v k="$1" '$1 == k { print $2; exit }' "$2")
+  [ -n "$raw" ] || { printf '0'; return 0; }
+  size_to_bytes "$raw"
+}
+
+# The volumes docker labels as belonging to <stack>. This label is docker's own
+# record of which compose project created the volume, so it is the targeting
+# mechanism rather than any name-shape guess of ours.
+stack_volumes() {  # <stack>
+  docker volume ls --filter "label=com.docker.compose.project=$1" --format '{{.Name}}' 2>/dev/null || true
 }
 
 # --- this home's task records ----------------------------------------------
@@ -289,7 +351,7 @@ task_endpoint_absent() {  # <task-id>
 # --- no-go boundary ---------------------------------------------------------
 #
 # The operator's declared no-go prefixes are a boundary on what agent work may
-# touch, and stopping a stack composed from inside one is touching it. A
+# touch, and acting on a stack composed from inside one is touching it. A
 # malformed declaration refuses the whole sweep rather than sweeping past a
 # protection the operator believed was in force.
 
@@ -313,9 +375,13 @@ LOOSE_CONTAINERS=$(awk -F'\t' '$2 == "" { n++ } END { print n + 0 }' "$CONTAINER
 ORPHAN_STACKS=0
 ORPHAN_CONTAINERS=0
 ORPHAN_MEM=0
+ORPHAN_VOLUMES=0
+ORPHAN_VOL_BYTES=0
 LIVE_STACKS=0
 UNKNOWN_STACKS=0
 : > "$TMP/orphan-ids"
+: > "$TMP/orphan-volumes"
+: > "$TMP/kept-volumes"
 
 printf 'Running stacks (home: %s)\n\n' "$FM_HOME"
 
@@ -327,9 +393,16 @@ while IFS= read -r stack; do
 
   mem=0
   for cid in $ids; do
-    part=$(container_mem_bytes "$cid")
-    [ -n "$part" ] || part=0
+    part=$(lookup_bytes "$cid" "$MEM")
     mem=$((mem + part))
+  done
+
+  volumes=$(stack_volumes "$stack")
+  vol_count=$(printf '%s\n' "$volumes" | grep -c . || true)
+  vol_bytes=0
+  for vol in $volumes; do
+    part=$(lookup_bytes "$vol" "$VOLSIZES")
+    vol_bytes=$((vol_bytes + part))
   done
 
   verdict=unknown
@@ -366,29 +439,38 @@ while IFS= read -r stack; do
     fi
   fi
 
+  vol_note=
+  [ "$vol_count" -eq 0 ] || vol_note=$(printf ' %d volume(s) %s' "$vol_count" "$(human_bytes "$vol_bytes")")
+
   case "$verdict" in
     orphaned)
       ORPHAN_STACKS=$((ORPHAN_STACKS + 1))
       ORPHAN_CONTAINERS=$((ORPHAN_CONTAINERS + count))
       ORPHAN_MEM=$((ORPHAN_MEM + mem))
+      ORPHAN_VOLUMES=$((ORPHAN_VOLUMES + vol_count))
+      ORPHAN_VOL_BYTES=$((ORPHAN_VOL_BYTES + vol_bytes))
       printf '%s\n' "$ids" | grep . >> "$TMP/orphan-ids" || true
-      printf '  ORPHANED  %-28s %2d container(s)  %8s  %s\n' \
-        "$stack" "$count" "$(human_bytes "$mem")" "$detail"
+      printf '%s\n' "$volumes" | grep . >> "$TMP/orphan-volumes" || true
+      printf '  ORPHANED  %-28s %2d container(s)  %8s%s  %s\n' \
+        "$stack" "$count" "$(human_bytes "$mem")" "$vol_note" "$detail"
       ;;
     live)
       LIVE_STACKS=$((LIVE_STACKS + 1))
-      printf '  live      %-28s %2d container(s)  %8s  %s\n' \
-        "$stack" "$count" "$(human_bytes "$mem")" "$detail"
+      printf '%s\n' "$volumes" | grep . >> "$TMP/kept-volumes" || true
+      printf '  live      %-28s %2d container(s)  %8s%s  %s\n' \
+        "$stack" "$count" "$(human_bytes "$mem")" "$vol_note" "$detail"
       ;;
     protected)
       UNKNOWN_STACKS=$((UNKNOWN_STACKS + 1))
-      printf '  left      %-28s %2d container(s)  %8s  %s\n' \
-        "$stack" "$count" "$(human_bytes "$mem")" "$detail"
+      printf '%s\n' "$volumes" | grep . >> "$TMP/kept-volumes" || true
+      printf '  left      %-28s %2d container(s)  %8s%s  %s\n' \
+        "$stack" "$count" "$(human_bytes "$mem")" "$vol_note" "$detail"
       ;;
     *)
       UNKNOWN_STACKS=$((UNKNOWN_STACKS + 1))
-      printf '  unknown   %-28s %2d container(s)  %8s  %s\n' \
-        "$stack" "$count" "$(human_bytes "$mem")" "$detail"
+      printf '%s\n' "$volumes" | grep . >> "$TMP/kept-volumes" || true
+      printf '  unknown   %-28s %2d container(s)  %8s%s  %s\n' \
+        "$stack" "$count" "$(human_bytes "$mem")" "$vol_note" "$detail"
       ;;
   esac
 done < "$STACKS"
@@ -416,14 +498,19 @@ if [ "$ORPHAN_STACKS" -eq 0 ]; then
 fi
 
 if [ "$STOP" -eq 0 ]; then
-  printf 'Would stop %d container(s) holding %s. Re-run with --stop to do it.\n' \
+  printf 'Would stop %d container(s) holding %s.\n' \
     "$ORPHAN_CONTAINERS" "$(human_bytes "$ORPHAN_MEM")"
+  if [ "$ORPHAN_VOLUMES" -gt 0 ]; then
+    printf 'Their %d volume(s) hold %s on disk, which --stop alone does NOT reclaim.\n' \
+      "$ORPHAN_VOLUMES" "$(human_bytes "$ORPHAN_VOL_BYTES")"
+    printf 'Re-run with --stop, or --stop --remove-volumes to also reclaim that disk.\n'
+  else
+    printf 'Re-run with --stop to do it.\n'
+  fi
   exit 0
 fi
 
-# Stop exactly the containers listed above, by id, and nothing else. Containers
-# only: no removal of containers, images, volumes or networks, so every stack
-# stopped here comes back with `docker start`.
+# Stop exactly the containers listed above, by id, and nothing else.
 printf '\nStopping %d container(s)...\n' "$ORPHAN_CONTAINERS"
 STOP_FAILED=0
 while IFS= read -r cid; do
@@ -436,11 +523,66 @@ while IFS= read -r cid; do
   fi
 done < "$TMP/orphan-ids"
 
-if [ "$STOP_FAILED" -gt 0 ]; then
-  printf 'Stopped %d of %d container(s); %d could not be stopped.\n' \
-    "$((ORPHAN_CONTAINERS - STOP_FAILED))" "$ORPHAN_CONTAINERS" "$STOP_FAILED"
-  exit 1
+if [ "$REMOVE_VOLUMES" -eq 0 ]; then
+  if [ "$STOP_FAILED" -gt 0 ]; then
+    printf 'Stopped %d of %d container(s); %d could not be stopped.\n' \
+      "$((ORPHAN_CONTAINERS - STOP_FAILED))" "$ORPHAN_CONTAINERS" "$STOP_FAILED"
+    exit 1
+  fi
+  printf 'Stopped %d container(s), releasing %s.\n' \
+    "$ORPHAN_CONTAINERS" "$(human_bytes "$ORPHAN_MEM")"
+  if [ "$ORPHAN_VOLUMES" -gt 0 ]; then
+    printf 'Left %d volume(s) holding %s; --stop --remove-volumes reclaims that disk.\n' \
+      "$ORPHAN_VOLUMES" "$(human_bytes "$ORPHAN_VOL_BYTES")"
+  fi
+  exit 0
 fi
 
-printf 'Stopped %d container(s), releasing %s.\n' \
-  "$ORPHAN_CONTAINERS" "$(human_bytes "$ORPHAN_MEM")"
+# --- destructive path -------------------------------------------------------
+#
+# Only reachable with both flags typed. The containers removed here are the
+# exact ids stopped above; the volumes are the exact names the report listed,
+# re-checked against every volume belonging to a stack this run did NOT
+# attribute as orphaned.
+
+printf '\nRemoving %d orphaned container(s) so their volumes can be released...\n' \
+  "$ORPHAN_CONTAINERS"
+RM_FAILED=0
+while IFS= read -r cid; do
+  [ -n "$cid" ] || continue
+  docker rm "$cid" >/dev/null 2>"$TMP/rm.err" || {
+    RM_FAILED=$((RM_FAILED + 1))
+    printf '  FAILED  %s: %s\n' "${cid:0:12}" "$(tr '\n' ' ' < "$TMP/rm.err")" >&2
+  }
+done < "$TMP/orphan-ids"
+
+printf 'Removing %d volume(s) holding %s...\n' \
+  "$ORPHAN_VOLUMES" "$(human_bytes "$ORPHAN_VOL_BYTES")"
+RECLAIMED=0
+VOL_FAILED=0
+while IFS= read -r vol; do
+  [ -n "$vol" ] || continue
+  # Second, independent check: a volume that any non-orphaned stack claims is
+  # never removed, whatever the label filter returned.
+  if grep -Fqx "$vol" "$TMP/kept-volumes" 2>/dev/null; then
+    printf '  kept    %s (claimed by a stack that is not orphaned)\n' "$vol"
+    continue
+  fi
+  bytes=$(lookup_bytes "$vol" "$VOLSIZES")
+  if docker volume rm "$vol" >/dev/null 2>"$TMP/vol.err"; then
+    RECLAIMED=$((RECLAIMED + bytes))
+    printf '  removed %-44s %8s\n' "$vol" "$(human_bytes "$bytes")"
+  else
+    VOL_FAILED=$((VOL_FAILED + 1))
+    printf '  FAILED  %s: %s\n' "$vol" "$(tr '\n' ' ' < "$TMP/vol.err")" >&2
+  fi
+done < "$TMP/orphan-volumes"
+
+printf 'Reclaimed %s on disk and %s of memory across %d stack(s).\n' \
+  "$(human_bytes "$RECLAIMED")" "$(human_bytes "$ORPHAN_MEM")" "$ORPHAN_STACKS"
+
+if [ "$STOP_FAILED" -gt 0 ] || [ "$RM_FAILED" -gt 0 ] || [ "$VOL_FAILED" -gt 0 ]; then
+  printf '%d container(s) could not be stopped, %d could not be removed, %d volume(s) could not be removed.\n' \
+    "$STOP_FAILED" "$RM_FAILED" "$VOL_FAILED" >&2
+  exit 1
+fi

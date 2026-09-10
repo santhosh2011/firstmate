@@ -28,6 +28,10 @@ make_home() {  # <name>
   : > "$dir/stopped.log"
   : > "$dir/windows.txt"
 
+  : > "$dir/volumes.tsv"
+  : > "$dir/removed.log"
+  : > "$dir/removed-volumes.log"
+
   cat > "$dir/fakebin/docker" <<'SH'
 #!/usr/bin/env bash
 case "$1" in
@@ -37,9 +41,40 @@ case "$1" in
   stats)
     cat "${FM_TEST_STATS:?}"
     ;;
+  system)
+    # `docker system df -v` with a range template over .Volumes: name and size.
+    awk -F'\t' '{ printf "%s\t%s\n", $1, $3 }' "${FM_TEST_VOLUMES:?}"
+    ;;
+  volume)
+    shift
+    case "$1" in
+      ls)
+        # Only the compose-project label filter is ever used for targeting.
+        project=
+        for arg in "$@"; do
+          case "$arg" in
+            label=com.docker.compose.project=*)
+              project=${arg#label=com.docker.compose.project=} ;;
+          esac
+        done
+        awk -F'\t' -v p="$project" '$2 == p { print $1 }' "${FM_TEST_VOLUMES:?}"
+        ;;
+      rm)
+        shift
+        printf '%s\n' "$@" >> "${FM_TEST_REMOVED_VOLUMES:?}"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
   stop)
     shift
     printf '%s\n' "$@" >> "${FM_TEST_STOPPED:?}"
+    ;;
+  rm)
+    shift
+    printf '%s\n' "$@" >> "${FM_TEST_REMOVED:?}"
     ;;
   *)
     exit 1
@@ -76,6 +111,12 @@ add_container() {
   printf '%s\t128MiB / 8GiB\n' "$2" >> "$1/stats.tsv"
 }
 
+# add_volume <dir> <volume-name> <stack> <docker-size>: a volume docker labels
+# as belonging to <stack>.
+add_volume() {
+  printf '%s\t%s\t%s\n' "$2" "$3" "$4" >> "$1/volumes.tsv"
+}
+
 # add_live_task <dir> <id> <worktree>: a recorded task whose window exists.
 add_live_task() {
   local dir=$1 id=$2 wt=$3
@@ -102,6 +143,8 @@ run_sweep() {  # <dir> [args...]
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_TEST_CONTAINERS="$dir/containers.tsv" FM_TEST_STATS="$dir/stats.tsv" \
   FM_TEST_STOPPED="$dir/stopped.log" FM_TEST_WINDOWS="$dir/windows.txt" \
+  FM_TEST_VOLUMES="$dir/volumes.tsv" FM_TEST_REMOVED="$dir/removed.log" \
+  FM_TEST_REMOVED_VOLUMES="$dir/removed-volumes.log" \
   PATH="$dir/fakebin:$PATH" \
     "$SWEEP" "$@" 2>&1
 }
@@ -142,6 +185,7 @@ test_live_task_stack_is_never_stopped() {
   dir=$(make_home live)
   add_live_task "$dir" busy-task "$dir/pool/busy"
   add_container "$dir" c-live-1 busy-stack "$dir/pool/busy"
+  add_volume "$dir" busy-stack_data busy-stack 900MB
 
   out=$(run_sweep "$dir")
   assert_contains "$out" "live      busy-stack" "live task's stack not reported as live"
@@ -152,7 +196,92 @@ test_live_task_stack_is_never_stopped() {
   assert_not_contains "$out" "Stopping" "--stop acted while only a live stack was running"
   [ ! -s "$dir/stopped.log" ] \
     || fail "a live task's stack was stopped: $(cat "$dir/stopped.log")"
+
+  # And with the destructive flag typed too, its data is still untouched.
+  out=$(run_sweep "$dir" --stop --remove-volumes)
+  [ ! -s "$dir/stopped.log" ] \
+    || fail "a live task's stack was stopped: $(cat "$dir/stopped.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "a live task's volumes were removed: $(cat "$dir/removed-volumes.log")"
   pass "a live task's stack is never stopped"
+}
+
+test_remove_volumes_requires_stop() {
+  local dir out rc
+  dir=$(make_home needs-stop)
+  add_live_task "$dir" live-task "$dir/pool/live"
+  add_container "$dir" c-orphan-1 gone-stack "$dir/pool/returned"
+  add_volume "$dir" gone-stack_data gone-stack 500MB
+
+  set +e
+  out=$(run_sweep "$dir" --remove-volumes)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "--remove-volumes without --stop"
+  assert_contains "$out" "requires --stop" "the destructive flag was accepted on its own"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "volumes removed without --stop: $(cat "$dir/removed-volumes.log")"
+  pass "--remove-volumes is refused unless --stop is typed too"
+}
+
+test_report_prices_volumes_without_touching_them() {
+  local dir out
+  dir=$(make_home price)
+  add_live_task "$dir" live-task "$dir/pool/live"
+  add_container "$dir" c-orphan-1 gone-stack "$dir/pool/returned"
+  add_volume "$dir" gone-stack_db gone-stack 1GB
+  add_volume "$dir" gone-stack_cache gone-stack 1GB
+
+  out=$(run_sweep "$dir")
+  assert_contains "$out" "2 volume(s)" "report did not count the orphaned stack's volumes"
+  assert_contains "$out" "1.9GiB" "report did not price the orphaned stack's volumes"
+  assert_contains "$out" "--stop alone does NOT reclaim" "report did not distinguish disk from memory"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "report mode removed volumes: $(cat "$dir/removed-volumes.log")"
+  pass "the report prices volumes per stack and in total without touching them"
+}
+
+test_stop_alone_removes_nothing() {
+  local dir out
+  dir=$(make_home stop-only)
+  add_live_task "$dir" live-task "$dir/pool/live"
+  add_container "$dir" c-orphan-1 gone-stack "$dir/pool/returned"
+  add_volume "$dir" gone-stack_db gone-stack 1GB
+
+  out=$(run_sweep "$dir" --stop)
+  assert_contains "$out" "Stopped 1 container(s)" "stop run did not report the stopped count"
+  assert_contains "$out" "Left 1 volume(s)" "stop run did not report the disk it left behind"
+  [ ! -s "$dir/removed.log" ] \
+    || fail "--stop removed containers: $(cat "$dir/removed.log")"
+  [ ! -s "$dir/removed-volumes.log" ] \
+    || fail "--stop removed volumes: $(cat "$dir/removed-volumes.log")"
+  pass "--stop removes nothing and says what disk it left"
+}
+
+test_remove_volumes_targets_only_the_orphaned_stack() {
+  local dir out removed
+  dir=$(make_home rmvol)
+  add_live_task "$dir" busy-task "$dir/pool/busy"
+  add_container "$dir" c-live-1 busy-stack "$dir/pool/busy"
+  add_volume "$dir" busy-stack_db busy-stack 2GB
+  add_container "$dir" c-orphan-1 gone-stack "$dir/pool/returned"
+  add_volume "$dir" gone-stack_db gone-stack 1GB
+  add_volume "$dir" gone-stack_cache gone-stack 500MB
+  add_container "$dir" c-foreign-1 someone-elses-db /opt/unrelated
+  add_volume "$dir" someone-elses-db_data someone-elses-db 4GB
+
+  out=$(run_sweep "$dir" --stop --remove-volumes)
+
+  removed=$(sort "$dir/removed-volumes.log" | tr '\n' ' ')
+  [ "$removed" = "gone-stack_cache gone-stack_db " ] \
+    || fail "--remove-volumes targeted volumes outside the orphaned stack: $removed"
+
+  removed=$(sort "$dir/removed.log" | tr '\n' ' ')
+  [ "$removed" = "c-orphan-1 " ] \
+    || fail "--remove-volumes removed containers outside the orphaned stack: $removed"
+
+  assert_contains "$out" "Reclaimed 1.4GiB" "reclaimed disk total not reported"
+  pass "--remove-volumes targets only the orphaned stack's volumes"
 }
 
 test_unattributable_stack_is_left_alone() {
@@ -247,3 +376,7 @@ test_bare_invocation_changes_nothing
 test_stop_stops_only_what_it_listed
 test_no_go_path_stack_is_protected
 test_unreadable_docker_is_a_blocker
+test_remove_volumes_requires_stop
+test_report_prices_volumes_without_touching_them
+test_stop_alone_removes_nothing
+test_remove_volumes_targets_only_the_orphaned_stack
