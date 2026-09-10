@@ -29,7 +29,11 @@
 #
 #   1. Nothing belonging to a live task is ever touched. A recorded task counts
 #      as live unless its endpoint is authoritatively absent, so an ambiguous or
-#      unreadable answer keeps the stack.
+#      unreadable answer keeps the stack. Attribution routinely names more than
+#      one recorded task, because a worktree slot is handed back and reissued:
+#      a stack is debris only when EVERY task naming it is authoritatively gone.
+#      One live claimant keeps it, and a claimant nobody can read leaves it
+#      alone and reported. Ambiguity never resolves toward removal.
 #   2. Removal is always targeted by name, one container or volume at a time,
 #      derived from the stack it was attributed to. This script never runs a
 #      blanket sweep - no `docker volume prune`, no `docker system prune`, no
@@ -218,21 +222,45 @@ docker volume ls --filter dangling=true --format '{{.Name}}' > "$TMP/dangling-ra
 # Live tasks come from state/<id>.meta. Torn-down tasks leave no meta, so a
 # stack named for a task that once existed here is attributed through the
 # durable per-task data/<id>/ directory that survives cleanup.
+#
+# Records are always read most recently written first. A worktree slot is handed
+# back and reissued, so several recorded tasks routinely name the same directory
+# and the same derived compose project name; when they do, the slot's current
+# occupant is the one whose record was written last, and an older occupant must
+# never outvote it.
 
-live_meta_ids() {
+META_ORDER="$TMP/metas-by-recency"
+
+# Modification time of <file>, or 0 when the host will not answer. Used only to
+# order candidates for reporting and tie-breaking, never to decide whether one
+# of them is live.
+file_mtime() {  # <file>
+  local m
+  m=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true)
+  printf '%s' "${m:-0}"
+}
+
+# Every recorded meta, most recently written first. Built once so every
+# attribution signal below walks the records in the same order.
+build_meta_order() {
   local meta
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    basename "$meta" .meta
-  done
+    printf '%s\t%s\n' "$(file_mtime "$meta")" "$meta"
+  done | sort -t "$(printf '\t')" -k1,1nr -k2,2 | cut -f2- > "$META_ORDER"
 }
+build_meta_order
 
-known_task_ids() {
-  local dir
-  live_meta_ids
+# Task ids this home has a durable data/<id>/ directory for but no record of
+# under state/ - what a task leaves behind after cleanup, and the only shape
+# that makes a stack named for it debris by name alone.
+retired_task_ids() {
+  local dir id
   for dir in "$DATA"/*/; do
     [ -d "$dir" ] || continue
-    basename "$dir"
+    id=$(basename "$dir")
+    [ -f "$STATE/$id.meta" ] && continue
+    printf '%s\n' "$id"
   done
 }
 
@@ -254,42 +282,54 @@ path_under() {  # <path> <prefix>
   esac
 }
 
-# The task id whose recorded worktree contains <path>, or nothing. This is the
-# strongest attribution available: it ties a running stack to a task through the
-# directory the stack was actually composed from.
-task_owning_path() {  # <working-dir>
-  local dir=$1 meta id wt
+# Every task id whose recorded worktree meets <working-dir>, most recent first.
+# This is the strongest attribution available: it ties a running stack to a task
+# through the directory the stack was actually composed from.
+#
+# Containment is tested both ways on purpose. A stack composed from a directory
+# that HOLDS a recorded worktree is that task's environment just as much as one
+# composed from inside it - the shape an SDev workspace takes, where several
+# repo worktrees sit under the one directory the stack is composed from. That
+# upward reach stops at this home's own task-worktree roots, so a stack composed
+# from some broad ancestor such as the home directory does not thereby claim
+# every task on the machine.
+#
+# Every match is returned rather than the first, because a reissued worktree
+# slot is recorded by every task that has held it.
+tasks_owning_path() {  # <working-dir>
+  local dir=$1 meta wt holds=0
   [ -n "$dir" ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
+  path_under_task_root "$dir" && holds=1
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
     wt=$(fm_meta_get "$meta" worktree)
     [ -n "$wt" ] || continue
-    if path_under "$dir" "$wt"; then
-      id=$(basename "$meta" .meta)
-      printf '%s\n' "$id"
-      return 0
+    if path_under "$dir" "$wt" || { [ "$holds" -eq 1 ] && path_under "$wt" "$dir"; }; then
+      basename "$meta" .meta
     fi
-  done
+  done < "$META_ORDER"
 }
 
-# The task id a compose project name refers to, or nothing. Falls back to the
-# task's SDev slug and to its worktree basename, because those are the two names
-# a generated compose project is built from.
-task_owning_name() {  # <stack>
+# Every task id a compose project name can refer to, most recent first. Falls
+# back to the task's SDev slug and to its worktree basename, because those are
+# the two names a generated compose project is built from - and a reissued
+# worktree slot hands the same basename, so the same project name, to every task
+# that has held it.
+tasks_owning_name() {  # <stack>
   local stack=$1 meta id norm want
   norm=$(compose_normalize "$stack")
   [ -n "$norm" ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
     id=$(basename "$meta" .meta)
     for want in "$id" "$(fm_meta_get "$meta" slug)" "$(basename "$(fm_meta_get "$meta" worktree)" 2>/dev/null || true)"; do
       [ -n "$want" ] || continue
       if [ "$(compose_normalize "$want")" = "$norm" ]; then
         printf '%s\n' "$id"
-        return 0
+        break
       fi
     done
-  done
+  done < "$META_ORDER"
 }
 
 # 0 when <stack> names a task this home once ran but no longer has a record of
@@ -301,7 +341,7 @@ stack_names_retired_task() {  # <stack>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     [ "$(compose_normalize "$id")" = "$norm" ] && return 0
-  done < <(known_task_ids)
+  done < <(retired_task_ids)
   return 1
 }
 
@@ -311,12 +351,12 @@ stack_names_retired_task() {  # <stack>
 # worktree has since been returned.
 task_worktree_roots() {
   local meta wt
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
     wt=$(fm_meta_get "$meta" worktree)
     [ -n "$wt" ] || continue
     dirname "$wt"
-  done | sort -u
+  done < "$META_ORDER" | sort -u
 }
 
 path_under_task_root() {  # <working-dir>
@@ -329,23 +369,63 @@ path_under_task_root() {  # <working-dir>
   return 1
 }
 
-# A recorded task counts as live unless its endpoint is authoritatively gone.
-# `dead` and `missing` are the only two states the fleet's recovery contract
-# treats as conclusive (bin/fm-backend.sh's fm_backend_agent_state); every other
-# answer, including an unreadable one, keeps the stack.
-task_endpoint_absent() {  # <task-id>
+# What this home can say about one recorded task's endpoint: `live`, `gone`, or
+# `unresolved`. `dead` and `missing` are the only two states the fleet's recovery
+# contract treats as conclusive (bin/fm-backend.sh's fm_backend_agent_state);
+# `alive` is the only conclusive answer in the other direction. Everything else,
+# including an unreadable one and a record carrying no endpoint at all, is
+# unresolved and never resolves toward removal.
+task_endpoint_state() {  # <task-id>
   local id=$1 meta backend target state
   meta="$STATE/$id.meta"
-  [ -f "$meta" ] || return 0
+  [ -f "$meta" ] || { printf 'gone'; return 0; }
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
-  [ -n "$target" ] || return 1
+  [ -n "$target" ] || { printf 'unresolved'; return 0; }
   backend=$(fm_backend_of_meta "$meta")
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || state=unreadable
   case "$state" in
-    dead|missing) return 0 ;;
-    *) return 1 ;;
+    dead|missing) printf 'gone' ;;
+    alive) printf 'live' ;;
+    *) printf 'unresolved' ;;
   esac
+}
+
+# Resolve the tasks that claim one stack into a single verdict, in
+# OWNER_VERDICT (`live`, `orphaned`, `unresolved`, or empty when nothing claims
+# it), OWNER_ID (the task to report it under) and OWNER_TOTAL.
+#
+# Ambiguity never resolves to orphaned. One live claimant makes the stack live
+# however many dead records sit beside it, and a claimant whose endpoint cannot
+# be read leaves the stack alone. Only a set every member of which is
+# authoritatively gone is debris. Candidates arrive most recent first, so the
+# stack is reported under the slot's current occupant rather than a predecessor.
+resolve_owners() {  # <task-id>...
+  local id state live_id='' gone_id='' unresolved_id=''
+  OWNER_VERDICT=
+  OWNER_ID=
+  OWNER_TOTAL=0
+  for id in "$@"; do
+    [ -n "$id" ] || continue
+    OWNER_TOTAL=$((OWNER_TOTAL + 1))
+    state=$(task_endpoint_state "$id")
+    case "$state" in
+      live) [ -n "$live_id" ] || live_id=$id ;;
+      gone) [ -n "$gone_id" ] || gone_id=$id ;;
+      *) [ -n "$unresolved_id" ] || unresolved_id=$id ;;
+    esac
+  done
+  [ "$OWNER_TOTAL" -gt 0 ] || return 0
+  if [ -n "$live_id" ]; then
+    OWNER_VERDICT=live
+    OWNER_ID=$live_id
+  elif [ -n "$unresolved_id" ]; then
+    OWNER_VERDICT=unresolved
+    OWNER_ID=$unresolved_id
+  else
+    OWNER_VERDICT=orphaned
+    OWNER_ID=$gone_id
+  fi
 }
 
 # --- no-go boundary ---------------------------------------------------------
@@ -407,20 +487,35 @@ while IFS= read -r stack; do
 
   verdict=unknown
   detail=
-  owner=$(task_owning_path "$workdir")
-  [ -n "$owner" ] || owner=$(task_owning_name "$stack")
+  # Every task that claims this stack, not the first one found: a reissued
+  # worktree slot, and the compose project name derived from it, are recorded by
+  # every task that has held them.
+  owners=$(tasks_owning_path "$workdir")
+  [ -n "$owners" ] || owners=$(tasks_owning_name "$stack")
 
   if path_is_no_go "$workdir"; then
     verdict=protected
     detail="composed from inside the declared no-go path $FM_NO_GO_MATCH"
-  elif [ -n "$owner" ]; then
-    if task_endpoint_absent "$owner"; then
-      verdict=orphaned
-      detail="task $owner is recorded but its endpoint is gone"
-    else
-      verdict=live
-      detail="task $owner is still running"
-    fi
+  elif [ -n "$owners" ]; then
+    # shellcheck disable=SC2086  # task ids are single words; the split is the list
+    resolve_owners $owners
+    case "$OWNER_VERDICT" in
+      live)
+        verdict=live
+        detail="task $OWNER_ID is still running"
+        [ "$OWNER_TOTAL" -le 1 ] || detail="$detail, alongside $((OWNER_TOTAL - 1)) older record(s) of the same directory"
+        ;;
+      unresolved)
+        verdict=unresolved
+        detail="task $OWNER_ID claims this stack and its endpoint could not be read"
+        [ "$OWNER_TOTAL" -le 1 ] || detail="$detail, so the $OWNER_TOTAL tasks claiming it cannot be told apart"
+        ;;
+      *)
+        verdict=orphaned
+        detail="task $OWNER_ID is recorded but its endpoint is gone"
+        [ "$OWNER_TOTAL" -le 1 ] || detail="$detail, as is every one of the $OWNER_TOTAL tasks claiming this stack"
+        ;;
+    esac
   elif stack_names_retired_task "$stack"; then
     verdict=orphaned
     detail="named for task ${stack}, which this home no longer has a record of"
@@ -465,7 +560,7 @@ while IFS= read -r stack; do
       printf '  live      %-28s %2d container(s)  %8s%s  %s\n' \
         "$stack" "$count" "$(human_bytes "$mem")" "$vol_note" "$detail"
       ;;
-    protected)
+    protected|unresolved)
       UNKNOWN_STACKS=$((UNKNOWN_STACKS + 1))
       printf '%s\n' "$volumes" | grep . >> "$TMP/kept-volumes" || true
       printf '  left      %-28s %2d container(s)  %8s%s  %s\n' \
@@ -490,7 +585,8 @@ fi
 # the ones an orphaned stack is already scheduled to free, which would otherwise
 # be counted and attempted twice, and not the ones a kept stack owns. A volume
 # whose own compose label resolves to a live task is never a candidate however
-# unreferenced docker thinks it is.
+# unreferenced docker thinks it is, and a label several recorded tasks answer to
+# has to clear the same whole-set test the stacks above did.
 
 : > "$TMP/dangling"
 DANGLING_COUNT=0
@@ -504,9 +600,11 @@ while IFS= read -r vol; do
   case "$project" in
     ''|'<no value>') ;;
     *)
-      owner=$(task_owning_name "$project")
-      if [ -n "$owner" ] && ! task_endpoint_absent "$owner"; then
-        continue
+      owners=$(tasks_owning_name "$project")
+      if [ -n "$owners" ]; then
+        # shellcheck disable=SC2086  # task ids are single words; the split is the list
+        resolve_owners $owners
+        [ "$OWNER_VERDICT" = orphaned ] || continue
       fi
       ;;
   esac
