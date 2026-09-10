@@ -127,7 +127,7 @@ family_for_basename() {
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-retention.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
-    fm-subagent-pretool-check.test.sh|\
+    fm-stack-sweep.test.sh|fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
@@ -674,6 +674,9 @@ families_for_changed_path() {
       # in particular decides the fatal-boundary behavior that only the
       # secondmate family covers.
       printf '%s\n' secondmate
+      ;;
+    bin/fm-stack-sweep.sh)
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
