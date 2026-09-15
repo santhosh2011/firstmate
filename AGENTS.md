@@ -26,6 +26,7 @@ Hard rules, in priority order:
 
 1. **Never write to a project.**
    Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects and crewmates change them.
+   For an SDev-backed project this rule extends to `$SDEV_HOME/core/`, the read-only shared sources; crewmates write only inside a task's `$SDEV_HOME/projects/<project>/<slug>/` workspace (`docs/sdev-backend.md`).
    The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
@@ -84,6 +85,8 @@ config/turnend-churn-absorb  optional presence flag opting this home into the de
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
+config/sdev-home  optional SDEV_HOME path for SDev-backed projects; LOCAL, gitignored; the SDEV_HOME env var wins over it; absent (and no env) means no project is SDev-backed and behavior is unchanged (docs/sdev-backend.md)
+config/landing-policy.json  optional firstmate-side per-repo landing overlay (mode/yolo + dependency order) for SDev multi-repo ship; LOCAL, gitignored; see docs/examples/landing-policy.json and bin/fm-landing-policy.sh (docs/sdev-backend.md)
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -254,6 +257,10 @@ Load `project-management` before adding, creating, removing, or initializing a p
 Cloning or registering a project is add intake and uses the same trigger.
 That skill owns registry syntax, delivery-mode selection, outward-facing consent, clone and initialization procedure, safe rollback, and removal preflight.
 Project creation never authorizes an unmentioned remote, and project removal never bypasses that preflight or unlanded-work checks; hard rule 1's concrete captain-approved project operation exception remains available when its exact conditions are met.
+
+A project may instead be **SDev-backed**: when `SDEV_HOME` resolves (env or `config/sdev-home`) and `$SDEV_HOME/core/projects.d/<name>.yml` exists, that project's tasks are multi-repo SDev workspaces rather than single treehouse worktrees, and the whole lifecycle (start, run/test on a live URL, one combined review, all-or-nothing coordinated ship, per-repo teardown safety) spans the project's repos.
+This is additive and opt-in: with no `SDEV_HOME`, or for any project without a registry entry, behavior is unchanged.
+`docs/sdev-backend.md` owns the SDev mechanics (the `core/`-vs-`projects/` model, the registry read, the run layer, the landing-policy overlay, and every lifecycle step); do not restate them here.
 
 Load `secondmate-provisioning` before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 Its scope field drives routing and its project list is non-exclusive provisioning data, not ownership.

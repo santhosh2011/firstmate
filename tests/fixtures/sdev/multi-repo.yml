@@ -1,0 +1,21 @@
+# Fixture: a multi-repo SDev project (modeled on scdi = api + ui + common).
+# Exercises the N>1 repo composition and per-repo default_base/compose_role.
+conf_prefix: multi-api
+default_shell_service: api
+stack_services: [nginx, api, ui, db, redis]
+repos:
+  api:
+    path: multi_api_src
+    default_base: develop
+    compose_role: api
+    link_node_modules: false
+  ui:
+    path: multi_ui_src
+    default_base: develop
+    compose_role: ui
+    link_node_modules: false
+  common:
+    path: common
+    default_base: main
+    compose_role: common
+    link_node_modules: false

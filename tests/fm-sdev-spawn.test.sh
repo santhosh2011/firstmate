@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# Behavior tests for fm-spawn.sh's SDev workspace provider (phase 2).
+#
+# When the target project is SDev-backed (fm-sdev-registry reports it under a set
+# SDEV_HOME), fm-spawn creates a multi-repo SDev workspace with `sdev new <slug>`
+# instead of a treehouse worktree, launches the crewmate in the workspace dir,
+# asserts per-repo worktree isolation, and records sdev_home=/slug=/repos= in meta.
+# When the project is NOT SDev-backed, the treehouse path is taken exactly as
+# before - this file's control case guards that byte-for-byte contract.
+#
+# A claude worker is refused for an SDev task before any window or workspace
+# exists: bin/fm-claude-trust.sh pre-registers Claude workspace trust only for a
+# linked git worktree of the project, and an SDev workspace is a plain directory
+# holding per-repo worktrees, so the worker would wedge on the trust dialog.
+#
+# Fakes, like the other fm-spawn suites: a fake tmux captures the launch command
+# and reports the pane cwd; a fake treehouse logs whether it was invoked; a fake
+# sdev creates genuine per-repo git worktrees so the isolation assertion runs
+# against real git state.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity fmtest fmtest@example.invalid
+
+SPAWN="$ROOT/bin/fm-spawn.sh"
+FIXTURES="$ROOT/tests/fixtures/sdev"
+TMP_ROOT=$(fm_test_tmproot fm-sdev-spawn)
+
+assert_eq() {
+  [ "$1" = "$2" ] || fail "$3"$'\n'"--- expected ---"$'\n'"$2"$'\n'"--- actual ---"$'\n'"$1"
+}
+
+# Fake sdev: `new` builds real per-repo worktrees from sources it reads out of the
+# registry with yq; `cd` prints the workspace dir. Broken-isolation mode (a plain
+# dir instead of a worktree) is triggered by FM_FAKE_SDEV_BREAK=<repo-path>.
+# Every invocation is appended to FM_FAKE_SDEV_LOG when set.
+make_sdev_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/sdev" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_SDEV_LOG:-}" ] || printf 'sdev %s\n' "$*" >> "$FM_FAKE_SDEV_LOG"
+proj=
+while [ "${1:-}" = "-p" ]; do proj=$2; shift 2; done
+cmd=${1:-}; slug=${2:-}
+home=${SDEV_HOME:?}
+reg="$home/core/projects.d/$proj.yml"
+ws="$home/projects/$proj/$slug"
+case "$cmd" in
+  new)
+    mkdir -p "$ws"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      if [ "${FM_FAKE_SDEV_BREAK:-}" = "$p" ]; then
+        mkdir -p "$ws/$p"
+      else
+        git -C "$home/core/$proj/$p" worktree add -q -b "task/$slug" "$ws/$p" >/dev/null 2>&1
+      fi
+    done < <(yq -r '.repos | to_entries | .[] | .value.path' "$reg")
+    ;;
+  cd) printf '%s\n' "$ws" ;;
+  up) : > "$ws/.fake-up" ;;
+  *) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/sdev"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  send-keys)
+    [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        [ "$prev" = "-l" ] && printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'called %s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  printf '%s\n' "$fakebin"
+}
+
+# Every ship spawn carries an explicit delivery contract, and the brief must
+# record the same mode (bin/fm-spawn.sh refuses a mismatch), so the fixture brief
+# is the two-subsection Task scaffold plus that contract line.
+write_brief() {  # <home> <id>
+  local home=$1 id=$2
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise the SDev workspace provider for $id.
+
+## Firstmate spec
+Record the multi-repo workspace this task runs in.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+}
+
+# Build a case: an fm HOME pinned to the given crew harness, an SDEV_HOME with
+# the registry fixture and one source repo per registry repo, a project clone
+# dir, a brief, and the fake bin.
+setup_case() {
+  local name=$1 proj=$2 fixture=$3 harness=${4:-codex} case_dir home sdev fakebin p
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  sdev="$case_dir/sdev"
+  fakebin=$(make_sdev_fakebin "$case_dir/fake")
+  mkdir -p "$home/projects/$proj" "$home/state" "$home/config"
+  printf '%s\n' "$harness" > "$home/config/crew-harness"
+  write_brief "$home" "task-$name"
+  touch "$home/state/.last-watcher-beat"
+  mkdir -p "$sdev/core/projects.d"
+  cp "$FIXTURES/$fixture" "$sdev/core/projects.d/$proj.yml"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    fm_git_init_commit "$sdev/core/$proj/$p"
+  done < <(yq -r '.repos | to_entries | .[] | .value.path' "$sdev/core/projects.d/$proj.yml")
+  printf '%s|%s|%s|%s\n' "$case_dir" "$home" "$sdev" "$fakebin"
+}
+
+# A throwaway HOME keeps any harness trust registration out of the developer's
+# own config store, exactly as tests/fixtures.sh's fm_test_run_spawn does.
+run_spawn() {
+  local home=$1 sdev=$2 fakebin=$3
+  shift 3
+  mkdir -p "$home/user-home"
+  PATH="$fakebin:$PATH" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+  FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_SPAWN_NO_GUARD=1 TMUX="${TMUX:-fake,1,0}" \
+  SDEV_HOME="$sdev" \
+  "$SPAWN" "$@" --mode no-mistakes --yolo off
+}
+
+meta_val() { grep "^$2=" "$1" | head -1 | cut -d= -f2-; }
+
+test_sdev_backed_takes_sdev_path() {
+  local parts case_dir home sdev fakebin id meta ws
+  parts=$(setup_case backed scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-backed
+  ws="$sdev/projects/scdi/$id"
+  FM_FAKE_PANE_PATH="$ws" \
+  FM_FAKE_SEND_LOG="$case_dir/send.log" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err" \
+    || { echo "spawn failed:"; cat "$case_dir/err"; fail "sdev-backed spawn should succeed"; }
+
+  meta="$home/state/$id.meta"
+  assert_present "$meta" "sdev-backed: meta written"
+  assert_eq "$(meta_val "$meta" sdev_home)" "$sdev" "sdev-backed: sdev_home recorded"
+  assert_eq "$(meta_val "$meta" slug)" "$id" "sdev-backed: slug recorded"
+  assert_eq "$(meta_val "$meta" repos)" "api ui common" "sdev-backed: repos keys recorded in order"
+  assert_eq "$(meta_val "$meta" worktree)" "$ws" "sdev-backed: worktree is the SDev workspace"
+  assert_eq "$(meta_val "$meta" mode)" "no-mistakes" "sdev-backed: the explicit delivery mode is recorded"
+  assert_grep "$ws" "$case_dir/send.log" "sdev-backed: crewmate pane is cd'd into the workspace"
+  assert_grep "$home/data/$id/launch-brief.md" "$case_dir/launch.log" "sdev-backed: crewmate launch command is sent"
+  assert_no_grep "treehouse get" "$case_dir/send.log" "sdev-backed: treehouse get must NOT be sent on the SDev path"
+  pass "fm-spawn takes the SDev workspace path for an SDev-backed project"
+}
+
+test_sdev_workspace_repos_are_isolated_worktrees() {
+  local parts case_dir home sdev fakebin id ws p
+  parts=$(setup_case iso scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-iso
+  ws="$sdev/projects/scdi/$id"
+  FM_FAKE_PANE_PATH="$ws" run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi \
+    >/dev/null 2>"$case_dir/err" || { cat "$case_dir/err"; fail "iso spawn should succeed"; }
+  for p in multi_api_src multi_ui_src common; do
+    local d_real top_real
+    d_real=$(cd "$ws/$p" && pwd -P)
+    top_real=$(cd "$(git -C "$ws/$p" rev-parse --show-toplevel)" && pwd -P)
+    assert_eq "$top_real" "$d_real" \
+      "isolation: $p is its own worktree root, distinct from its source"
+  done
+  pass "fm-spawn's SDev workspace holds one isolated git worktree per repo"
+}
+
+test_sdev_isolation_failure_aborts() {
+  local parts case_dir home sdev fakebin id
+  parts=$(setup_case broken scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-broken
+  set +e
+  FM_FAKE_SDEV_BREAK=common \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "broken isolation: spawn must abort when a repo dir is not a worktree"
+  assert_grep "isolated git worktree" "$case_dir/err" "broken isolation: error names the isolation failure"
+  [ ! -s "$case_dir/launch.log" ] || fail "broken isolation: no crewmate is launched"
+  pass "fm-spawn aborts the SDev spawn when a repo dir is not an isolated worktree"
+}
+
+test_claude_harness_is_refused_before_any_workspace_exists() {
+  local parts case_dir home sdev fakebin id
+  parts=$(setup_case claude scdi multi-repo.yml claude)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-claude
+  set +e
+  FM_FAKE_SDEV_LOG="$case_dir/sdev.log" \
+  FM_FAKE_SEND_LOG="$case_dir/send.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "claude: an SDev spawn on the claude harness must be refused"
+  assert_grep "dispatch SDev tasks on another harness" "$case_dir/err" "claude: refusal names the harness boundary"
+  [ ! -e "$case_dir/sdev.log" ] || fail "claude: sdev must not be invoked for a refused spawn"
+  [ ! -e "$case_dir/send.log" ] || fail "claude: no window is driven for a refused spawn"
+  [ ! -d "$sdev/projects/scdi/$id" ] || fail "claude: no workspace is left behind by a refused spawn"
+  assert_absent "$home/state/$id.meta" "claude: no task record is written for a refused spawn"
+  pass "fm-spawn refuses a claude worker for an SDev task before creating a window or workspace"
+}
+
+test_non_sdev_project_uses_treehouse_unchanged() {
+  local parts case_dir home sdev fakebin id meta wt
+  parts=$(setup_case control scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-control
+  # A real project repo with a worktree the fake pane will report, standing in
+  # for treehouse get; the treehouse path keys its shared project lock off the
+  # project's git identity, so unlike the SDev path it needs a real repository.
+  wt="$case_dir/wt"
+  fm_git_worktree "$case_dir/proj" "$wt" wt-control
+  # SDEV_HOME unset: the project is not SDev-backed, so the treehouse path runs.
+  mkdir -p "$home/user-home"
+  PATH="$fakebin:$PATH" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="${TMUX:-fake,1,0}" \
+    FM_FAKE_PANE_PATH="$wt" FM_FAKE_SEND_LOG="$case_dir/send.log" \
+    env -u SDEV_HOME "$SPAWN" "$id" "$case_dir/proj" --mode no-mistakes --yolo off >/dev/null 2>"$case_dir/err" \
+    || { cat "$case_dir/err"; fail "control spawn should succeed"; }
+
+  meta="$home/state/$id.meta"
+  assert_grep "treehouse get" "$case_dir/send.log" "control: treehouse get IS sent for a non-SDev project"
+  assert_no_grep "sdev_home=" "$meta" "control: no sdev_home in a treehouse task's meta"
+  assert_no_grep "slug=" "$meta" "control: no slug in a treehouse task's meta"
+  assert_no_grep "repos=" "$meta" "control: no repos in a treehouse task's meta"
+  assert_eq "$(meta_val "$meta" worktree)" "$wt" "control: worktree is the treehouse worktree"
+  pass "fm-spawn leaves the treehouse path unchanged for a non-SDev project"
+}
+
+test_sdev_backed_takes_sdev_path
+test_sdev_workspace_repos_are_isolated_worktrees
+test_sdev_isolation_failure_aborts
+test_claude_harness_is_refused_before_any_workspace_exists
+test_non_sdev_project_uses_treehouse_unchanged

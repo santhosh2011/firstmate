@@ -1,0 +1,17 @@
+# Fixture: a local-only SDev project (modeled on spnr = local repos, no remote).
+# The registry YAML never declares remotes, so the reader is remote-agnostic:
+# it emits the same repo composition whether or not a source has an origin.
+conf_prefix: localonly-api
+default_shell_service: api
+stack_services: [nginx, api, ui, db, redis]
+repos:
+  api:
+    path: localonly-api
+    default_base: develop
+    compose_role: api
+    link_node_modules: false
+  ui:
+    path: localonly-ui
+    default_base: develop
+    compose_role: ui
+    link_node_modules: false
