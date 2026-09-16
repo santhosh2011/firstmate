@@ -282,7 +282,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-harness-precedence.test.sh|\
+    fm-harness-precedence.test.sh|fm-install-pins.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
@@ -365,7 +365,7 @@ family_for_basename() {
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-no-go-paths.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|fm-sdev-spawn.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -716,6 +716,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh 23
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-home-summary-refresh.test.sh 34793
 tests/fm-inactive-reconcile.test.sh 74399
+tests/fm-install-pins.test.sh 2084
 tests/fm-kimi-harness.test.sh 18015
 tests/fm-landing-policy.test.sh 237
 tests/fm-lint-workflows.test.sh 855
@@ -782,6 +783,7 @@ tests/fm-sessionstart-nudge.test.sh 66194
 tests/fm-shared-captain-inheritance.test.sh 6108
 tests/fm-ship-multi.test.sh 3702
 tests/fm-spawn-dispatch-profile.test.sh 63996
+tests/fm-spawn-no-go-paths.test.sh 16857
 tests/fm-spawn-pool-base-freshen.test.sh 34920
 tests/fm-spawn-worktree-settle.test.sh 5687
 tests/fm-startup-memory-budget.test.sh 6964
@@ -1505,9 +1507,13 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
-    bin/fm-peek.sh|bin/fm-composer*)
+    bin/fm-peek.sh|bin/fm-composer*|bin/fm-no-go-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # Every script here also drives a secondmate launch, and the no-go library
+      # in particular decides the fatal-boundary behavior that only the
+      # secondmate family covers.
+      printf '%s\n' secondmate
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane

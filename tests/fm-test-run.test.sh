@@ -120,6 +120,7 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
+    fm-sdev-spawn.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
@@ -132,6 +133,8 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
+  : >"$repo/bin/fm-no-go-lib.sh"
+  : >"$repo/bin/fm-spawn.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared top-level test fixture read by two suites in different families,
   # beside a tests/ file nothing reads at all.
@@ -340,6 +343,25 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  # The no-go library decides the fatal-boundary behavior of secondmate config
+  # inheritance, which only the secondmate family covers, so --changed must
+  # over-select it alongside the dispatch families it obviously touches.
+  printf '\n' >>"$repo/bin/fm-no-go-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" "no-go library selects backend-dispatch coverage"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "no-go library selects secondmate coverage"
+  git -C "$repo" add bin/fm-no-go-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm no-go-change
+
+  # The SDev worktree provider lives in fm-spawn.sh, and its abort-verb coverage
+  # lives only in the SDev spawn suite, so editing the spawner must select it.
+  printf '\n' >>"$repo/bin/fm-spawn.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-sdev-spawn.test.sh" "spawner selects SDev spawn coverage"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "spawner still selects backend-dispatch coverage"
+  git -C "$repo" add bin/fm-spawn.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

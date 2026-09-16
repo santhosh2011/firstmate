@@ -107,10 +107,13 @@ Neither path moves the host's Firstmate copy, and the host-local launch never re
 `/updatefirstmate` is the one path that still follows that copy: it first updates the remote code root from its own origin, then syncs the home to that refreshed code-root commit.
 SSH exit 255 preserves the route and reports unknown completion; it never triggers local respawn or failover.
 The same placement-specific launch and deferred bootstrap sweep also propagate the primary's inherited local material declared by [`fm_config_inherit_items`](../../../bin/fm-config-inherit-lib.sh), whose owner also defines which items are session-scoped.
+`config/no-go-paths` declares the absolute directory prefixes agent work must never be dispatched into, so inheriting it holds a secondmate's own crewmates to the same off-limits directories and a secondmate cannot route around a machine-wide boundary; see `docs/configuration.md` "No-go paths".
 Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
 Propagation failures warn without blocking a local secondmate launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
 The destination keeps whatever safely validated state the helper left behind.
 For inherited config files, local propagation and the remote sender preserve the destination item on source inspection errors and mirror only proven absence; [`fm-config-inherit-lib.sh`](../../../bin/fm-config-inherit-lib.sh) owns this boundary.
+`config/no-go-paths` is the one exception to that advisory posture on a local launch, because it is a safety boundary rather than a default: when the primary has one and it could not be written into the home, `fm-spawn.sh --secondmate` refuses the launch instead of starting a home whose crewmates would see no restriction.
+A primary that has no `config/no-go-paths` at all is the unrestricted default and still mirrors that absence downstream non-fatally.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
 A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
@@ -130,6 +133,8 @@ No AGENTS.md reread nudge is needed at spawn or respawn because the agent reads 
 Bootstrap reports successful AGENTS.md re-read sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
 A separate, literal-content config reread is required whenever inherited `config/*` material changes under an already-running secondmate.
 For a local home, after each successful allowlisted config write, both the locked bootstrap convergence path and mid-session `bin/fm-config-push.sh` use the shared propagation report to build one per-home generation-specific private instruction file from the validated destination post-write bytes for only the declared config items that actually changed for that home, in declaration order.
+`config/no-go-paths` is inherited but deliberately excluded from that allowlist, so it is never inlined into an instruction and a push that changed only it sends nothing.
+Its bytes are the operator's private absolute paths, and it is a mechanical refusal boundary applied by `bin/fm-spawn.sh` at dispatch time rather than a default an agent weighs, so the reread framing below would state the opposite of its contract.
 Each changed path is printed with clear begin/end delimiters and the destination file's full exact new bytes unparsed, or the explicit token `ABSENT` when propagation removed the destination copy.
 The instruction uses only minimal framing that these are defaults/rules and do not remove judgment; it never includes SHA values, selected profiles, parsed summaries, or any other generated interpretation.
 `data/captain-shared.md` is not a config file and is never inlined into this instruction file or message.

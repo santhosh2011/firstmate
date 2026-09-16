@@ -1,0 +1,24 @@
+# config/no-go-paths - directories agent work must never be dispatched into
+# (matched by bin/fm-no-go-lib.sh, enforced by bin/fm-spawn.sh). Copy this into
+# a local, gitignored config/no-go-paths and edit. One absolute path prefix per
+# non-empty, non-comment line.
+#
+# Rules:
+#   - a leading ~ or ~/ expands to $HOME
+#   - trailing slashes are tolerated
+#   - matching is on a path-component boundary, so /a/b blocks /a/b and /a/b/c
+#     but never /a/bc
+#   - a symlinked alias of a declared prefix is blocked too
+#   - a non-empty line that is not an absolute path refuses the spawn as a
+#     configuration error rather than being silently skipped
+#
+# An ABSENT config/no-go-paths means no restriction: every dispatch behaves
+# exactly as it did without the file.
+#
+# Secondmate homes inherit this file from the primary, so a secondmate's own
+# crewmates are held to the same boundary.
+#
+# Example: personal working copies kept for reading and tinkering, which no
+# crewmate, scout, or secondmate may ever be dispatched into.
+~/personal-checkouts
+/Volumes/scratch/hand-edits
