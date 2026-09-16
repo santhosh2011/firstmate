@@ -288,7 +288,7 @@ family_for_basename() {
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-retention.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
-    fm-subagent-pretool-check.test.sh|\
+    fm-stack-sweep.test.sh|fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
@@ -787,6 +787,7 @@ tests/fm-spawn-dispatch-profile.test.sh 63996
 tests/fm-spawn-no-go-paths.test.sh 16857
 tests/fm-spawn-pool-base-freshen.test.sh 34920
 tests/fm-spawn-worktree-settle.test.sh 5687
+tests/fm-stack-sweep.test.sh 9086
 tests/fm-startup-memory-budget.test.sh 6964
 tests/fm-startup-network.test.sh 62274
 tests/fm-stow-cascade.test.sh 3101
@@ -1515,6 +1516,9 @@ families_for_changed_path() {
       # in particular decides the fatal-boundary behavior that only the
       # secondmate family covers.
       printf '%s\n' secondmate
+      ;;
+    bin/fm-stack-sweep.sh)
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
