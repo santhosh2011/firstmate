@@ -8,6 +8,11 @@
 # When the project is NOT SDev-backed, the treehouse path is taken exactly as
 # before - this file's control case guards that byte-for-byte contract.
 #
+# A claude worker is refused for an SDev task before any window or workspace
+# exists: bin/fm-claude-trust.sh pre-registers Claude workspace trust only for a
+# linked git worktree of the project, and an SDev workspace is a plain directory
+# holding per-repo worktrees, so the worker would wedge on the trust dialog.
+#
 # Fakes, like the other fm-spawn suites: a fake tmux captures the launch command
 # and reports the pane cwd; a fake treehouse logs whether it was invoked; a fake
 # sdev creates genuine per-repo git worktrees so the isolation assertion runs
@@ -29,12 +34,14 @@ assert_eq() {
 # Fake sdev: `new` builds real per-repo worktrees from sources it reads out of the
 # registry with yq; `cd` prints the workspace dir. Broken-isolation mode (a plain
 # dir instead of a worktree) is triggered by FM_FAKE_SDEV_BREAK=<repo-path>.
+# Every invocation is appended to FM_FAKE_SDEV_LOG when set.
 make_sdev_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/sdev" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_SDEV_LOG:-}" ] || printf 'sdev %s\n' "$*" >> "$FM_FAKE_SDEV_LOG"
 proj=
 while [ "${1:-}" = "-p" ]; do proj=$2; shift 2; done
 cmd=${1:-}; slug=${2:-}
@@ -83,17 +90,11 @@ SH
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  # The relaunch precondition reads the pane's foreground command to decide
-  # whether the endpoint is positively agent-free. Default keeps the historic
-  # answer; a case that needs an agent-free verdict sets a shell name.
-  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  # A recorded window must appear in a successful inventory before tmux's
-  # foreground read is trusted, so a relaunch case declares its window here.
-  list-windows) printf '%s' "${FM_FAKE_WINDOWS:-}"; exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
     [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -118,17 +119,37 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# Build a case: an fm HOME, an SDEV_HOME with the registry fixture and one source
-# repo per registry repo, a project clone dir, a brief, and the fake bin.
+# Every ship spawn carries an explicit delivery contract, and the brief must
+# record the same mode (bin/fm-spawn.sh refuses a mismatch), so the fixture brief
+# is the two-subsection Task scaffold plus that contract line.
+write_brief() {  # <home> <id>
+  local home=$1 id=$2
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise the SDev workspace provider for $id.
+
+## Firstmate spec
+Record the multi-repo workspace this task runs in.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+}
+
+# Build a case: an fm HOME pinned to the given crew harness, an SDEV_HOME with
+# the registry fixture and one source repo per registry repo, a project clone
+# dir, a brief, and the fake bin.
 setup_case() {
-  local name=$1 proj=$2 fixture=$3 case_dir home sdev fakebin id p
+  local name=$1 proj=$2 fixture=$3 harness=${4:-codex} case_dir home sdev fakebin p
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   sdev="$case_dir/sdev"
   fakebin=$(make_sdev_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/task-$name" "$home/projects/$proj" "$home/state" "$home/config"
-  printf 'claude\n' > "$home/config/crew-harness"
-  printf 'brief\n' > "$home/data/task-$name/brief.md"
+  mkdir -p "$home/projects/$proj" "$home/state" "$home/config"
+  printf '%s\n' "$harness" > "$home/config/crew-harness"
+  write_brief "$home" "task-$name"
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$sdev/core/projects.d"
   cp "$FIXTURES/$fixture" "$sdev/core/projects.d/$proj.yml"
@@ -139,22 +160,19 @@ setup_case() {
   printf '%s|%s|%s|%s\n' "$case_dir" "$home" "$sdev" "$fakebin"
 }
 
-# Ship spawns carry the explicit per-task delivery contract fm-spawn.sh requires.
-# run_spawn_raw is the same call without it, for --relaunch, which reuses the
-# task's recorded mode and refuses a flag that would override it.
+# A throwaway HOME keeps any harness trust registration out of the developer's
+# own config store, exactly as tests/fixtures.sh's fm_test_run_spawn does.
 run_spawn() {
-  run_spawn_raw "$@" --mode no-mistakes --yolo off
-}
-
-run_spawn_raw() {
   local home=$1 sdev=$2 fakebin=$3
   shift 3
-  PATH="$fakebin:$PATH" \
+  mkdir -p "$home/user-home"
+  PATH="$fakebin:$PATH" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
   FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
   FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_SPAWN_NO_GUARD=1 TMUX="${TMUX:-fake,1,0}" \
   SDEV_HOME="$sdev" \
-  "$SPAWN" "$@"
+  "$SPAWN" "$@" --mode no-mistakes --yolo off
 }
 
 meta_val() { grep "^$2=" "$1" | head -1 | cut -d= -f2-; }
@@ -177,8 +195,9 @@ test_sdev_backed_takes_sdev_path() {
   assert_eq "$(meta_val "$meta" slug)" "$id" "sdev-backed: slug recorded"
   assert_eq "$(meta_val "$meta" repos)" "api ui common" "sdev-backed: repos keys recorded in order"
   assert_eq "$(meta_val "$meta" worktree)" "$ws" "sdev-backed: worktree is the SDev workspace"
+  assert_eq "$(meta_val "$meta" mode)" "no-mistakes" "sdev-backed: the explicit delivery mode is recorded"
   assert_grep "$ws" "$case_dir/send.log" "sdev-backed: crewmate pane is cd'd into the workspace"
-  assert_grep "$home/data/$id/brief.md" "$case_dir/launch.log" "sdev-backed: crewmate launch command is sent"
+  assert_grep "$home/data/$id/launch-brief.md" "$case_dir/launch.log" "sdev-backed: crewmate launch command is sent"
   assert_no_grep "treehouse get" "$case_dir/send.log" "sdev-backed: treehouse get must NOT be sent on the SDev path"
   pass "fm-spawn takes the SDev workspace path for an SDev-backed project"
 }
@@ -202,7 +221,7 @@ test_sdev_workspace_repos_are_isolated_worktrees() {
 }
 
 test_sdev_isolation_failure_aborts() {
-  local parts case_dir home sdev fakebin id meta
+  local parts case_dir home sdev fakebin id
   parts=$(setup_case broken scdi multi-repo.yml)
   IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
   id=task-broken
@@ -218,20 +237,45 @@ test_sdev_isolation_failure_aborts() {
   pass "fm-spawn aborts the SDev spawn when a repo dir is not an isolated worktree"
 }
 
+test_claude_harness_is_refused_before_any_workspace_exists() {
+  local parts case_dir home sdev fakebin id
+  parts=$(setup_case claude scdi multi-repo.yml claude)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-claude
+  set +e
+  FM_FAKE_SDEV_LOG="$case_dir/sdev.log" \
+  FM_FAKE_SEND_LOG="$case_dir/send.log" \
+    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "claude: an SDev spawn on the claude harness must be refused"
+  assert_grep "dispatch SDev tasks on another harness" "$case_dir/err" "claude: refusal names the harness boundary"
+  [ ! -e "$case_dir/sdev.log" ] || fail "claude: sdev must not be invoked for a refused spawn"
+  [ ! -e "$case_dir/send.log" ] || fail "claude: no window is driven for a refused spawn"
+  [ ! -d "$sdev/projects/scdi/$id" ] || fail "claude: no workspace is left behind by a refused spawn"
+  assert_absent "$home/state/$id.meta" "claude: no task record is written for a refused spawn"
+  pass "fm-spawn refuses a claude worker for an SDev task before creating a window or workspace"
+}
+
 test_non_sdev_project_uses_treehouse_unchanged() {
   local parts case_dir home sdev fakebin id meta wt
   parts=$(setup_case control scdi multi-repo.yml)
   IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
   id=task-control
-  # A real worktree the fake pane will report, standing in for treehouse get.
+  # A real project repo with a worktree the fake pane will report, standing in
+  # for treehouse get; the treehouse path keys its shared project lock off the
+  # project's git identity, so unlike the SDev path it needs a real repository.
   wt="$case_dir/wt"
   fm_git_worktree "$case_dir/proj" "$wt" wt-control
   # SDEV_HOME unset: the project is not SDev-backed, so the treehouse path runs.
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  mkdir -p "$home/user-home"
+  PATH="$fakebin:$PATH" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="${TMUX:-fake,1,0}" \
     FM_FAKE_PANE_PATH="$wt" FM_FAKE_SEND_LOG="$case_dir/send.log" \
-    env -u SDEV_HOME "$SPAWN" "$id" projects/scdi --mode no-mistakes --yolo off >/dev/null 2>"$case_dir/err" \
+    env -u SDEV_HOME "$SPAWN" "$id" "$case_dir/proj" --mode no-mistakes --yolo off >/dev/null 2>"$case_dir/err" \
     || { cat "$case_dir/err"; fail "control spawn should succeed"; }
 
   meta="$home/state/$id.meta"
@@ -311,55 +355,10 @@ test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger() {
   pass "an ordinary abort leaves the SDev workspace, port offset, and ledger entry in place"
 }
 
-# M1 regression. Upstream's --relaunch adopts a task's RECORDED worktree and
-# launches a replacement agent into it. For an SDev task that recorded worktree
-# is the multi-repo workspace, which already exists, so the workspace provider
-# must not run again: `sdev new <slug>` against a live slug is not idempotent.
-# Detected through sdev's own out-of-workspace state, the same way this file
-# tells "left alone" from "force-removed" - the fake rewrites the ledger entry on
-# every `new`, so a sentinel that survives proves `new` did not run twice.
-test_sdev_relaunch_reuses_the_recorded_workspace() {
-  local parts case_dir home sdev fakebin id meta ws
-  parts=$(setup_case relaunch scdi multi-repo.yml)
-  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
-  id=task-relaunch
-  ws="$sdev/projects/scdi/$id"
-
-  FM_FAKE_PANE_PATH="$ws" \
-  FM_FAKE_SEND_LOG="$case_dir/send1.log" \
-  FM_FAKE_LAUNCH_LOG="$case_dir/launch1.log" \
-    run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err1" \
-    || { echo "first spawn failed:"; cat "$case_dir/err1"; fail "relaunch: the initial SDev spawn should succeed"; }
-
-  meta="$home/state/$id.meta"
-  assert_eq "$(meta_val "$meta" worktree)" "$ws" "relaunch: the first spawn recorded the workspace"
-  printf 'sentinel-not-rewritten\n' > "$sdev/state/ledger/scdi-$id"
-
-  # A relaunch adopts a live endpoint, so the fake must present one: the recorded
-  # window in the inventory, and a plain shell as its foreground command so the
-  # endpoint reads as positively agent-free.
-  FM_FAKE_PANE_PATH="$ws" \
-  FM_FAKE_WINDOWS="$(meta_val "$meta" window | cut -d: -f2-)"$'\n' \
-  FM_FAKE_PANE_COMMAND=bash \
-  FM_FAKE_SEND_LOG="$case_dir/send2.log" \
-  FM_FAKE_LAUNCH_LOG="$case_dir/launch2.log" \
-    run_spawn_raw "$home" "$sdev" "$fakebin" "$id" --relaunch >/dev/null 2>"$case_dir/err2" \
-    || { echo "relaunch failed:"; cat "$case_dir/err2"; fail "relaunch: an SDev task should relaunch into its recorded workspace"; }
-
-  assert_grep sentinel-not-rewritten "$sdev/state/ledger/scdi-$id" \
-    "relaunch: \`sdev new\` ran a second time and rewrote the ledger entry"
-  assert_eq "$(meta_val "$meta" worktree)" "$ws" "relaunch: the recorded workspace is unchanged"
-  assert_eq "$(meta_val "$meta" slug)" "$id" "relaunch: slug= survives the relaunch"
-  assert_eq "$(meta_val "$meta" repos)" "api ui common" "relaunch: repos= survives the relaunch"
-  assert_grep "$home/data/$id/brief.md" "$case_dir/launch2.log" "relaunch: a replacement agent is launched"
-  assert_no_grep "treehouse get" "$case_dir/send2.log" "relaunch: the treehouse path must stay out of an SDev relaunch"
-  pass "an SDev relaunch reuses the recorded workspace instead of creating a second one"
-}
-
 test_sdev_backed_takes_sdev_path
 test_sdev_workspace_repos_are_isolated_worktrees
 test_sdev_isolation_failure_aborts
+test_claude_harness_is_refused_before_any_workspace_exists
 test_sdev_workspace_inside_a_no_go_path_is_refused_and_removed
 test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger
 test_non_sdev_project_uses_treehouse_unchanged
-test_sdev_relaunch_reuses_the_recorded_workspace

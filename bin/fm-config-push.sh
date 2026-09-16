@@ -27,8 +27,8 @@ live secondmate home.
 
 This is local-material-only:
   - does not fast-forward tracked files
-  - after successful reread-allowlisted config/* changes, sends a local literal-content
-    pointer or one durable marked remote reread nudge
+  - after successful config/* changes, sends a local literal-content pointer or
+    one durable marked remote reread nudge
     (no message when config is unchanged, or when only a reread-excluded item such
     as config/no-go-paths changed, unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,

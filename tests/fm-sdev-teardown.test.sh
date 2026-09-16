@@ -27,7 +27,13 @@ printf 'sdev %s\n' "\$*" >> '$sdev_log'
 exit 0
 SH
   chmod +x "$fakebin/sdev"
-  fm_fake_exit0 "$fakebin" tmux gh gh-axi treehouse tasks-axi
+  # tmux, gh, gh-axi, and treehouse are inert; the landed evidence here is the
+  # landed_<key>= marker and the local base, never a forge lookup. no-mistakes
+  # answers an empty `axi status` so the pre-teardown run-abort step is a no-op
+  # instead of reaching the real daemon. tasks-axi is deliberately NOT stubbed:
+  # teardown closes the backlog row itself when one exists and records a skip
+  # reason otherwise, exactly as tests/fm-teardown.test.sh exercises it.
+  fm_fake_exit0 "$fakebin" tmux gh gh-axi treehouse no-mistakes
   printf '%s\n' "$fakebin"
 }
 
@@ -76,9 +82,11 @@ YML
   cat > "$cfg/landing-policy.json" <<'JSON'
 { "projects": { "scdi": { "default": {"mode":"no-mistakes"}, "repos": { "common": {"mode":"local-only"} } } } }
 JSON
+  mkdir -p "$home/data"
   fm_write_meta "$home/state/$SLUG.meta" \
-    "window=firstmate:fm-$SLUG" "worktree=$ws" "project=$home/projects/scdi" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "window=firstmate:fm-$SLUG" "endpoint_task_id=$SLUG" "worktree=$ws" "project=$home/projects/scdi" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "spawn_gen=sdev-teardown-test-$SLUG" \
     "sdev_home=$sdev" "slug=$SLUG" "repos=api common"
   [ "$api_landed" = 1 ] && echo "landed_api=https://github.com/o/api/pull/1" >> "$home/state/$SLUG.meta"
   touch "$home/state/.last-watcher-beat"

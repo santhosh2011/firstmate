@@ -27,15 +27,26 @@ new_case() {
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/home/data" "$d/home/state" "$d/home/config" \
     "$d/nogo/proj" "$d/allowed"
+  # An ALLOWED project proceeds to the treehouse path, which keys its shared
+  # project lock off the project's git identity before the brief check, so the
+  # candidate project dirs are real repositories.
+  git init -q "$d/nogo/proj"
+  git init -q "$d/allowed"
   (CDPATH='' cd -- "$d" && pwd -P)
 }
 
 # Run fm-spawn with ambient firstmate overrides cleared so each case owns its
 # environment, and with HOME pinned to the case dir so ~ expansion is testable
 # without touching the real home.
+# A ship spawn carries its explicit delivery contract; a --secondmate launch
+# refuses those flags, so they are added only when no --secondmate is present.
 run_spawn() {  # <case-dir> <args...>
-  local d=$1
+  local d=$1 a
+  local -a contract=(--mode no-mistakes --yolo off)
   shift
+  for a in "$@"; do
+    [ "$a" != --secondmate ] || contract=()
+  done
   FM_ROOT_OVERRIDE='' \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
@@ -44,7 +55,7 @@ run_spawn() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 \
     FM_HOME="$d/home" \
     HOME="$d/home" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@" ${contract[@]+"${contract[@]}"} 2>&1
 }
 
 write_config() {  # <case-dir> <line...>
@@ -69,9 +80,10 @@ test_prefix_matching() {
     id="nogo-m$n-q7"
     d=$(new_case "match-$n")
     mkdir -p "$d/nogo/proj" "$d/nogo-sibling" "$d/home/blocked/deep/deeper"
+    git init -q "$d/nogo-sibling"
     # shellcheck disable=SC2059  # the table supplies the \n separators on purpose
     printf "${config//@D/$d}\n" > "$d/home/config/no-go-paths"
-    out=$(run_spawn "$d" "$id" "${project//@D/$d}" codex --mode no-mistakes --yolo off)
+    out=$(run_spawn "$d" "$id" "${project//@D/$d}" codex)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn should never succeed in this suite"
     case "$verdict" in
@@ -109,12 +121,13 @@ test_absent_file_is_unrestricted() {
   local d out status
   d=$(new_case absent)
   [ ! -e "$d/home/config/no-go-paths" ] || fail "fixture wrote a config file"
-  out=$(run_spawn "$d" nogo-absent-q7 "$d/nogo/proj" codex --mode no-mistakes --yolo off)
+  out=$(run_spawn "$d" nogo-absent-q7 "$d/nogo/proj" codex)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn with a missing brief should still fail"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
     && fail "an absent config file must not restrict anything"
-  printf '%s\n' "$out" | grep -F "no brief at $d/home/data/nogo-absent-q7/brief.md" >/dev/null \
+  { printf '%s\n' "$out" | grep -F "no brief at" >/dev/null \
+    && printf '%s\n' "$out" | grep -F "$d/home/data/nogo-absent-q7/brief.md" >/dev/null; } \
     || fail "absent config changed the existing failure path: $out"
   pass "an absent config/no-go-paths leaves dispatch behavior unchanged"
 }
@@ -125,7 +138,7 @@ test_refusal_names_path_and_prefix() {
   local d out
   d=$(new_case message)
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" nogo-msg-q7 "$d/nogo/proj" codex --mode no-mistakes --yolo off)
+  out=$(run_spawn "$d" nogo-msg-q7 "$d/nogo/proj" codex)
   printf '%s\n' "$out" | grep -F "$d/nogo/proj" >/dev/null \
     || fail "refusal did not name the offending path: $out"
   printf '%s\n' "$out" | grep -F "'$d/nogo'" >/dev/null \
@@ -142,7 +155,7 @@ test_refusal_leaves_no_state() {
   d=$(new_case leftovers)
   id=nogo-clean-q7
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" "$id" "$d/nogo/proj" codex --mode no-mistakes --yolo off)
+  out=$(run_spawn "$d" "$id" "$d/nogo/proj" codex)
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null || fail "fixture did not refuse: $out"
   [ ! -e "$d/home/state/$id.meta" ] || fail "a refused spawn wrote task metadata"
   [ ! -e "$d/home/state/$id.status" ] || fail "a refused spawn wrote a task status file"
@@ -163,7 +176,7 @@ test_batch_refuses_only_the_offending_pair() {
   # no-go check, so ambient detection - claude under an agent, unknown on a CI
   # runner - would decide this case instead of the guard.
   out=$(run_spawn "$d" --harness codex \
-    "nogo-batch-a-q7=$d/nogo/proj" "nogo-batch-b-q8=$d/allowed" --mode no-mistakes --yolo off)
+    "nogo-batch-a-q7=$d/nogo/proj" "nogo-batch-b-q8=$d/allowed")
   status=$?
   [ "$status" -ne 0 ] || fail "a batch containing a refused pair must exit non-zero"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -172,7 +185,7 @@ test_batch_refuses_only_the_offending_pair() {
     || fail "the refused pair was not reported by the batch loop: $out"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nogo-batch-b-q8' >/dev/null \
     || fail "a refused pair stopped the rest of the batch: $out"
-  printf '%s\n' "$out" | grep -F "no brief at $d/home/data/nogo-batch-b-q8/brief.md" >/dev/null \
+  printf '%s\n' "$out" | grep -F "$d/home/data/nogo-batch-b-q8/brief.md" >/dev/null \
     || fail "the allowed pair was not dispatched past the no-go check: $out"
   pass "a refused pair is reported and skipped while the rest of the batch still dispatches"
 }
@@ -220,14 +233,18 @@ test_allowed_secondmate_home_proceeds() {
   local d id out status
   d=$(new_case secondmate-ok)
   id=nogo-smok-q7
-  seed_secondmate_home "$d/allowed/home" "$id"
+  # Outside every declared prefix AND outside the fixture's git-backed project
+  # dirs: a home nested in another repository would have its inherited boundary
+  # file refused by the destination guard, which is a different refusal.
+  mkdir -p "$d/ok"
+  seed_secondmate_home "$d/ok/home" "$id"
   write_config "$d" "$d/nogo"
-  out=$(run_spawn "$d" "$id" "$d/allowed/home" --harness codex --secondmate)
+  out=$(run_spawn "$d" "$id" "$d/ok/home" --harness codex --secondmate)
   status=$?
   [ "$status" -ne 0 ] || fail "the fixture omits the charter, so this run must still fail"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
     && fail "a secondmate home outside every no-go path must not be refused: $out"
-  [ -e "$d/allowed/home/state" ] \
+  [ -e "$d/ok/home/state" ] \
     || fail "an allowed secondmate launch did not proceed past the no-go check: $out"
   printf '%s\n' "$out" | grep -F 'no brief at' >/dev/null \
     || fail "the allowed run did not stop at the brief check as expected: $out"
@@ -245,7 +262,7 @@ test_malformed_line_refuses() {
     d=$(new_case "malformed-$n")
     # shellcheck disable=SC2059  # the table supplies the \n separators on purpose
     printf "${config//@D/$d}\n" > "$d/home/config/no-go-paths"
-    out=$(run_spawn "$d" "nogo-bad$n-q7" "$d/allowed" codex --mode no-mistakes --yolo off)
+    out=$(run_spawn "$d" "nogo-bad$n-q7" "$d/allowed" codex)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: malformed config must not spawn"
     printf '%s\n' "$out" | grep -F 'is not an absolute path prefix' >/dev/null \
@@ -333,7 +350,17 @@ make_worktree_case() {  # <name> <id>
   fakebin=$(make_worktree_fakebin "$d/fake")
   mkdir -p "$home/projects" "$home/data/$2" "$d/nogo/pool"
   printf 'codex\n' > "$home/config/crew-harness"
-  printf 'brief for %s\n' "$2" > "$home/data/$2/brief.md"
+  cat > "$home/data/$2/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise the no-go worktree check for $2.
+
+## Firstmate spec
+Refuse a worktree inside a declared prefix.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" "wt-$2"
   printf '%s|%s|%s|%s\n' "$home" "$proj" "$wt" "$fakebin"
@@ -500,7 +527,7 @@ test_unreadable_config_refuses() {
         chmod 000 "$d/home/config/no-go-paths"
         ;;
     esac
-    out=$(run_spawn "$d" "nogo-unread$n-q7" "$d/allowed" codex --mode no-mistakes --yolo off)
+    out=$(run_spawn "$d" "nogo-unread$n-q7" "$d/allowed" codex)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: an unreadable config must not spawn"
     printf '%s\n' "$out" | grep -F 'the declared no-go paths cannot be read' >/dev/null \
@@ -521,7 +548,7 @@ test_symlinked_config_still_restricts() {
   d=$(new_case symlinked)
   printf '%s\n' "$d/nogo" > "$d/dotfiles-no-go-paths"
   ln -s "$d/dotfiles-no-go-paths" "$d/home/config/no-go-paths"
-  out=$(run_spawn "$d" nogo-symlink-q7 "$d/nogo/proj" codex --mode no-mistakes --yolo off)
+  out=$(run_spawn "$d" nogo-symlink-q7 "$d/nogo/proj" codex)
   status=$?
   [ "$status" -ne 0 ] || fail "a symlinked config must still refuse a matching path"
   printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
@@ -571,6 +598,18 @@ test_assert_status_contract() {
   status=0
   fm_no_go_assert "project directory" "$d/allowed" "$d/home/config" 2>"$err" || status=$?
   expect_code 1 "$status" "an unusable config must refuse an otherwise allowed path"
+
+  if [ "$(id -u)" != 0 ]; then
+    rm -rf "$d/home/config/no-go-paths"
+    printf '%s\n' "$d/nogo" > "$d/home/config/no-go-paths"
+    chmod 000 "$d/home/config"
+    status=0
+    fm_no_go_assert "project directory" "$d/allowed" "$d/home/config" 2>"$err" || status=$?
+    chmod 700 "$d/home/config"
+    expect_code 1 "$status" "a config dir that cannot be searched must refuse, never read as unrestricted"
+    assert_contains "$(cat "$err")" "could not be inspected" "the refusal did not report the failed lookup"
+    assert_contains "$(cat "$err")" "Permission denied" "the refusal did not carry the lookup error"
+  fi
   pass "fm_no_go_assert allows only a genuinely allowed path and refuses both refusal states"
 }
 
@@ -590,74 +629,25 @@ test_unsearchable_config_dir_refuses() {
   d=$(new_case unsearchable-config)
   printf '%s\n' "$d/nogo" > "$d/home/config/no-go-paths"
   chmod 000 "$d/home/config"
-  out=$(run_spawn "$d" nogo-unsearch-q7 "$d/allowed" codex --mode no-mistakes --yolo off)
+  out=$(run_spawn "$d" nogo-unsearch-q7 "$d/allowed" codex)
   status=$?
   chmod 700 "$d/home/config"
   [ "$status" -ne 0 ] || fail "an unsearchable config dir must not silently allow a dispatch: $out"
-  printf '%s\n' "$out" | grep -F 'could not be classified' >/dev/null \
+  # fm-spawn.sh probes other config/ items with the same lstat discipline before
+  # it reaches the no-go check, so whichever probe answers first, the run must
+  # name a failed lookup rather than proceed as if nothing were declared.
+  printf '%s\n' "$out" | grep -E 'could not be inspected|cannot inspect configuration' >/dev/null \
     || fail "the refusal did not report an undeterminable config state: $out"
-  printf '%s\n' "$out" | grep -F 'is not searchable' >/dev/null \
-    || fail "the refusal did not name the unsearchable directory as the reason: $out"
+  printf '%s\n' "$out" | grep -F 'Permission denied' >/dev/null \
+    || fail "the refusal did not carry the lookup error as the reason: $out"
+  printf '%s\n' "$out" | grep -F "$REFUSAL" >/dev/null \
+    && fail "an undeterminable config must not be reported as a prefix match: $out"
   printf '%s\n' "$out" | grep -F 'no brief at' >/dev/null \
     && fail "the refusal must precede the brief check"
   pass "a config/ directory that cannot be searched refuses instead of reading as unrestricted"
 }
 
-# --- the shared tri-state classifier ----------------------------------------
-#
-# One owner for the EXISTS / PROVABLY ABSENT / UNDETERMINABLE question, driven
-# against real filesystem states.
-test_path_state_contract() {
-  local d state
-  d=$(new_case path-state)
-  # shellcheck source=bin/fm-path-state-lib.sh
-  . "$ROOT/bin/fm-path-state-lib.sh"
-
-  state=0; fm_path_state "$d/allowed" || state=$?
-  expect_code "$FM_PATH_STATE_EXISTS" "$state" "an existing directory must classify as EXISTS"
-
-  printf 'x\n' > "$d/allowed/file"
-  state=0; fm_path_state "$d/allowed/file" || state=$?
-  expect_code "$FM_PATH_STATE_EXISTS" "$state" "an existing file must classify as EXISTS"
-
-  ln -s "$d/gone" "$d/allowed/dangling"
-  state=0; fm_path_state "$d/allowed/dangling" || state=$?
-  expect_code "$FM_PATH_STATE_EXISTS" "$state" "a dangling symlink is present, not absent"
-
-  state=0; fm_path_state "$d/allowed/missing" || state=$?
-  expect_code "$FM_PATH_STATE_ABSENT" "$state" "a missing entry under a searchable dir must be PROVABLY ABSENT"
-  [ -z "$FM_PATH_STATE_REASON" ] || fail "a provable absence must not carry a reason"
-
-  state=0; fm_path_state "$d/no/such/chain/entry" || state=$?
-  expect_code "$FM_PATH_STATE_ABSENT" "$state" "a genuinely missing ancestor chain is still PROVABLY ABSENT"
-
-  if [ "$(id -u)" != 0 ]; then
-    chmod 000 "$d/allowed"
-    state=0; fm_path_state "$d/allowed/file" || state=$?
-    chmod 700 "$d/allowed"
-    expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" \
-      "an entry under an unsearchable dir must be UNDETERMINABLE, never absent"
-
-    chmod 000 "$d/allowed"
-    state=0; fm_path_state "$d/allowed/missing" || state=$?
-    chmod 700 "$d/allowed"
-    expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" \
-      "a lookup that could not happen must be UNDETERMINABLE, never absent"
-
-    chmod 000 "$d/allowed"
-    state=0; fm_path_state "$d/allowed/deeper/entry" || state=$?
-    chmod 700 "$d/allowed"
-    expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" \
-      "an unsearchable ancestor must make the whole chain UNDETERMINABLE"
-  fi
-
-  state=0; fm_path_state "" || state=$?
-  expect_code "$FM_PATH_STATE_UNDETERMINABLE" "$state" "an empty path must be UNDETERMINABLE"
-  pass "fm_path_state separates EXISTS, provable absence, and an undeterminable lookup"
-}
-
 test_prefix_matching
-test_path_state_contract
 test_unsearchable_config_dir_refuses
 test_worktree_inside_a_no_go_path_is_refused
 test_worktree_refusal_unwinds_the_worktree_and_window

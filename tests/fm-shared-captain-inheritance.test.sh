@@ -194,10 +194,10 @@ test_undeterminable_source_leaves_the_destination_intact() {
   assert_shared_readonly "$second/data/captain-shared.md"
   grep -F 'mirrored primary absence' "$report" >/dev/null \
     && fail "undeterminable source: reported as a successful absence mirror"
-  assert_contains "$(cat "$err")" 'undeterminable primary source' \
-    "undeterminable source: no diagnostic named the undeterminable state"
-  assert_contains "$(cat "$err")" 'is not searchable' \
-    "undeterminable source: the diagnostic did not name the unsearchable directory"
+  assert_contains "$(cat "$err")" 'cannot inspect primary source' \
+    "undeterminable source: no diagnostic named the failed lookup"
+  assert_contains "$(cat "$err")" 'Permission denied' \
+    "undeterminable source: the diagnostic did not carry the lookup error"
   # No quarantine sibling may have been created either: nothing was displaced.
   [ -z "$(find "$second/data" -name '.captain-shared.md.quarantine.*' 2>/dev/null)" ] \
     || fail "undeterminable source: the destination copy was quarantined anyway"
@@ -238,10 +238,10 @@ test_undeterminable_destination_is_reported_as_failure() {
     || fail "undeterminable destination: an unreadable secondmate data dir was reported as success"
   grep -F "$(printf '%s\tunchanged' "$FM_SHARED_CAPTAIN_REL")" "$report" >/dev/null \
     && fail "undeterminable destination: recorded as unchanged rather than a failure"
-  assert_contains "$(cat "$err")" 'undeterminable destination' \
-    "undeterminable destination: no diagnostic named the undeterminable state"
-  assert_contains "$(cat "$err")" 'is not searchable' \
-    "undeterminable destination: the diagnostic did not name the unsearchable directory"
+  assert_contains "$(cat "$err")" 'cannot inspect destination' \
+    "undeterminable destination: no diagnostic named the failed lookup"
+  assert_contains "$(cat "$err")" 'Permission denied' \
+    "undeterminable destination: the diagnostic did not carry the lookup error"
   assert_grep "downstream shared body" "$second/data/captain-shared.md" \
     "undeterminable destination: the destination copy was modified"
   assert_shared_readonly "$second/data/captain-shared.md"

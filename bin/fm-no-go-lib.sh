@@ -10,7 +10,9 @@
 # Absent is the ONLY unrestricted state: a path that exists in any other form -
 # a directory, a dangling symlink, an unreadable file - is a boundary the
 # operator declared and this library cannot read, so it refuses rather than
-# silently reading it as "no restriction".
+# silently reading it as "no restriction". Absence must also be provable: a
+# config/ that cannot be searched leaves the file's state unknown, and that
+# refuses too, naming the reason.
 #
 # Matching is on a path-component boundary, never a raw string prefix, so /a/b
 # blocks /a/b and /a/b/c but never /a/bc. Both the literal and the physically
@@ -22,9 +24,6 @@
 # protection the operator believed was in force.
 #
 # docs/configuration.md "No-go paths" owns the operator-facing contract.
-#
-# shellcheck source=bin/fm-path-state-lib.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-path-state-lib.sh"
 
 # config-dir-relative name of the declared prefix file.
 FM_NO_GO_FILE="no-go-paths"
@@ -94,19 +93,33 @@ fm_no_go_is_under() {  # <path> <prefix>
   return 1
 }
 
+# The lstat probe that separates "absent" from "could not look". The shell's
+# -e and -L tests answer "no" for both, and this guard reads absence as
+# permission, so only a lookup that ran and answered ENOENT may count as absent.
+# Prints 1 when <path> exists in some form and 0 when it is provably absent;
+# fails with the errno text on stdout when the lookup itself could not happen,
+# such as a config/ that cannot be searched. The same technique as
+# fm_config_path_present in bin/fm-config-inherit-lib.sh, repeated here because
+# this is a leaf library that callers source on its own.
+fm_no_go_path_present() {  # <path>
+  perl -MErrno=ENOENT -e '
+    if (lstat $ARGV[0]) { print 1 }
+    elsif ($! == ENOENT) { print 0 }
+    else { print "$!"; exit 2 }
+  ' -- "$1"
+}
+
 # 0 when <path> exists and is a readable regular file, 1 when it is PROVABLY
 # absent, 2 with the reason on stderr when it exists but cannot be read as the
 # declared prefix list, or when its state could not be established at all.
 fm_no_go_config_readable() {  # <path>
-  local file=$1 reason state=0
-  fm_path_state "$file" || state=$?
-  if [ "$state" -eq "$FM_PATH_STATE_ABSENT" ]; then
-    return 1
-  fi
-  if [ "$state" -eq "$FM_PATH_STATE_UNDETERMINABLE" ]; then
-    echo "error: $file could not be classified because $FM_PATH_STATE_REASON, so the declared no-go paths cannot be read; refusing to dispatch" >&2
+  local file=$1 reason present status=0
+  present=$(fm_no_go_path_present "$file") || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "error: $file could not be inspected (${present:-unknown error}), so the declared no-go paths cannot be read; refusing to dispatch" >&2
     return 2
   fi
+  [ "$present" = 1 ] || return 1
   if [ -L "$file" ] && [ ! -e "$file" ]; then
     reason="is a dangling symlink"
   elif [ -d "$file" ]; then

@@ -37,7 +37,7 @@ test_sdev_ship_brief_lists_repos_and_branches() {
   local parts home sdev brief
   parts=$(make_case list scdi multi-repo.yml)
   IFS='|' read -r home sdev <<<"$parts"
-  run_brief "$home" "$sdev" task-list scdi --sdev --mode no-mistakes >/dev/null 2>&1 \
+  run_brief "$home" "$sdev" task-list scdi --mode no-mistakes --sdev >/dev/null 2>&1 \
     || fail "sdev ship brief should scaffold for an SDev-backed project"
   brief="$home/data/task-list/brief.md"
   assert_present "$brief" "sdev brief: written"
@@ -46,6 +46,9 @@ test_sdev_ship_brief_lists_repos_and_branches() {
   assert_grep "- ui (worktree: multi_ui_src/, branch task/task-list)" "$brief" "sdev brief: lists ui"
   assert_grep "- common (worktree: common/, branch task/task-list)" "$brief" "sdev brief: lists common"
   assert_grep "done: ready for review across repos" "$brief" "sdev brief: combined definition of done"
+  assert_grep "Delivery contract: mode=no-mistakes" "$brief" "sdev brief: records the delivery contract line spawn checks"
+  assert_grep "## Captain's intent" "$brief" "sdev brief: carries the two-subsection Task scaffold"
+  assert_grep "## Firstmate spec" "$brief" "sdev brief: carries the Firstmate spec subsection"
   assert_grep "you do not push or open PRs yourself" "$brief" "sdev brief: firstmate coordinates the ship"
   pass "fm-brief --sdev scaffolds a multi-repo ship brief with per-repo worktrees and branches"
 }
@@ -68,12 +71,25 @@ test_sdev_flag_rejected_for_non_sdev_project() {
   err="$TMP_ROOT/nonsdev.err"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
-    env -u SDEV_HOME "$BRIEF" task-x notaproject --sdev --mode no-mistakes >/dev/null 2>"$err" \
+    env -u SDEV_HOME "$BRIEF" task-x notaproject --mode no-mistakes --sdev >/dev/null 2>"$err" \
     && fail "sdev: --sdev for a non-SDev project must be rejected"
   assert_grep "not SDev-backed" "$err" "sdev: error explains the project is not SDev-backed"
   pass "fm-brief --sdev refuses a project that is not SDev-backed"
 }
 
+test_sdev_flag_requires_mode_like_every_ship_brief() {
+  local parts home sdev err
+  parts=$(make_case nomode scdi multi-repo.yml)
+  IFS='|' read -r home sdev <<<"$parts"
+  err="$TMP_ROOT/nomode.err"
+  run_brief "$home" "$sdev" task-nomode scdi --sdev >/dev/null 2>"$err" \
+    && fail "sdev: --sdev without --mode must be rejected"
+  assert_grep "ship briefs require --mode" "$err" "sdev: error names the missing delivery mode"
+  assert_absent "$home/data/task-nomode/brief.md" "sdev: no brief is written without a mode"
+  pass "fm-brief --sdev still requires --mode like every ship brief"
+}
+
 test_sdev_ship_brief_lists_repos_and_branches
+test_sdev_flag_requires_mode_like_every_ship_brief
 test_sdev_flag_rejected_for_scout
 test_sdev_flag_rejected_for_non_sdev_project

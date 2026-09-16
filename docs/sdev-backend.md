@@ -50,6 +50,9 @@ It creates the workspace with `sdev -p <project> new <slug>` (slug is the task i
 The workspace is `$SDEV_HOME/projects/<project>/<slug>/`, holding one git worktree per repo at `<workspace>/<repo path>`, each on branch `task/<slug>`.
 Before launch, fm-spawn asserts per-repo isolation: each repo directory must be its own git worktree root nested inside the workspace, so no repo resolves onto its shared source.
 Orca is excluded (it owns its own worktree) and secondmate spawns never take this path.
+A claude worker is refused for an SDev task before any window or workspace exists: `bin/fm-claude-trust.sh` pre-registers Claude workspace trust only for a linked git worktree of the project, and an SDev workspace is a plain directory holding per-repo worktrees, so the worker would wedge on the trust dialog; dispatch SDev tasks on another harness.
+An SDev spawn allocates no Treehouse slot, so it neither takes the shared Treehouse project lock nor refreshes a pooled worktree base; `sdev new` creates the per-repo worktrees from their sources.
+`fm-spawn.sh <id> --relaunch` reuses the recorded `slug=` and `sdev_home=` rather than re-reading the live registry, and re-asserts per-repo isolation on the recorded workspace instead of the single-worktree check.
 The meta records `sdev_home=`, `slug=`, and `repos=` (the repo keys) in addition to the usual fields; `project=` and `worktree=` stay, so anything that reads a treehouse task's meta is unaffected.
 Downstream steps resolve per-repo detail from the registry via `sdev_home` plus `slug`, rather than duplicating it into meta.
 
@@ -91,8 +94,9 @@ The single-repo ship path (`fm-pr-check.sh` / `fm-pr-merge.sh` for a treehouse t
 
 ## Multi-repo ship brief - `bin/fm-brief.sh --sdev`
 
-`fm-brief.sh <id> <project> --sdev` scaffolds a multi-repo ship brief: one git worktree per repo (resolved from the registry), each on branch `task/<slug>`, with a combined definition of done across the repos.
+`fm-brief.sh <id> <project> --mode <mode> --sdev` scaffolds a multi-repo ship brief: one git worktree per repo (resolved from the registry), each on branch `task/<slug>`, with a combined definition of done across the repos.
 It is ship-only and requires the project to be SDev-backed.
+Like every ship brief it takes `--mode`, carries the two-subsection `# Task` scaffold, and opens its definition of done with the `Delivery contract: mode=<mode>` line that `bin/fm-spawn.sh` checks against its own `--mode`; the worker never lands anything itself, so the mode-specific single-repo definition of done does not apply.
 The single-repo ship brief is unchanged when the flag is absent.
 
 ## Empirical verification
