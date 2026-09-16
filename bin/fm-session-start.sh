@@ -39,6 +39,9 @@
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
+#                       A scheduled retention run's one plain latest-summary
+#                       sentence prints here too when one has been published
+#                       (read-only, always safe; docs/retention.md).
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -743,6 +746,13 @@ else
   else
     printf '(no queued wakes)\n'
   fi
+fi
+
+# The detailed timestamped run logs stay under data/retention/runs/.
+# Session start deliberately surfaces only the captain-facing sentence.
+if [ -f "$DATA/retention/latest-summary" ] && [ ! -L "$DATA/retention/latest-summary" ]; then
+  subsection "RETENTION"
+  sed -n '1p' "$DATA/retention/latest-summary"
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
