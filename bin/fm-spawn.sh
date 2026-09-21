@@ -3937,6 +3937,25 @@ claude*)
     exit 1
   fi
   ;;
+codex*)
+  # A Treehouse pool worktree is reused across tasks and is already trusted
+  # once seen, so only an SDev workspace - a brand-new per-task directory
+  # every time - needs pre-registration here; bin/fm-codex-trust.sh's own
+  # header owns the full diagnosis and mechanism.
+  if [ "$IS_SDEV" = 1 ]; then
+    codex_trust_repo_args=()
+    while IFS= read -r codex_trust_repo; do
+      [ -n "$codex_trust_repo" ] || continue
+      codex_trust_repo_args+=("$codex_trust_repo")
+    done <<CODEX_TRUST_REPOS
+$SDEV_REPO_PATHS
+CODEX_TRUST_REPOS
+    if ! "$FM_ROOT/bin/fm-codex-trust.sh" "$WT" "${codex_trust_repo_args[@]}" >/dev/null; then
+      echo "error: could not pre-register codex workspace trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; inspect window $T" >&2
+      exit 1
+    fi
+  fi
+  ;;
 agy)
   if [ "$KIND" != secondmate ]; then
     if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then

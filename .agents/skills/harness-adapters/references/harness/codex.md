@@ -18,7 +18,8 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+The decision persists per exact launch directory in `${CODEX_HOME:-~/.codex}/config.toml`, so a reused Treehouse pool worktree skips it, but a fresh SDev workspace (a brand-new per-task directory every time) does not.
+`../../../bin/fm-spawn.sh` pre-registers that trust for an SDev spawn through `../../../bin/fm-codex-trust.sh`, the codex counterpart of `fm-claude-trust.sh`; its own header owns the diagnosis and mechanism, and a registration failure refuses the spawn rather than launching a worker that would wedge on the dialog.
 
 ## Skill popup
 
