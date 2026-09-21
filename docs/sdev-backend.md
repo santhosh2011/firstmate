@@ -51,6 +51,7 @@ The workspace is `$SDEV_HOME/projects/<project>/<slug>/`, holding one git worktr
 Before launch, fm-spawn asserts per-repo isolation: each repo directory must be its own git worktree root nested inside the workspace, so no repo resolves onto its shared source.
 Orca is excluded (it owns its own worktree) and secondmate spawns never take this path.
 A claude worker is refused for an SDev task before any window or workspace exists: `bin/fm-claude-trust.sh` pre-registers Claude workspace trust only for a linked git worktree of the project, and an SDev workspace is a plain directory holding per-repo worktrees, so the worker would wedge on the trust dialog; dispatch SDev tasks on another harness.
+A codex worker instead proceeds: `bin/fm-codex-trust.sh` pre-registers codex's own trust for the SDev workspace path, keyed to the exact launch directory, verified against an isolated git worktree nested inside it, and refuses the spawn if registration fails.
 An SDev spawn allocates no Treehouse slot, so it neither takes the shared Treehouse project lock nor refreshes a pooled worktree base; `sdev new` creates the per-repo worktrees from their sources.
 `fm-spawn.sh <id> --relaunch` reuses the recorded `slug=` and `sdev_home=` rather than re-reading the live registry, and re-asserts per-repo isolation on the recorded workspace instead of the single-worktree check.
 The meta records `sdev_home=`, `slug=`, and `repos=` (the repo keys) in addition to the usual fields; `project=` and `worktree=` stay, so anything that reads a treehouse task's meta is unaffected.
