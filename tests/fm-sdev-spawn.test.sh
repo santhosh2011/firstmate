@@ -202,6 +202,21 @@ test_sdev_backed_takes_sdev_path() {
   pass "fm-spawn takes the SDev workspace path for an SDev-backed project"
 }
 
+test_codex_spawn_pretrusts_the_sdev_workspace() {
+  local parts case_dir home sdev fakebin id ws store
+  parts=$(setup_case codex-trust scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-codex-trust
+  ws="$sdev/projects/scdi/$id"
+  FM_FAKE_PANE_PATH="$ws" run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi \
+    >/dev/null 2>"$case_dir/err" || { cat "$case_dir/err"; fail "codex-trust spawn should succeed"; }
+  store="$home/user-home/.codex/config.toml"
+  assert_present "$store" "codex-trust: fm-spawn did not create a codex trust store"
+  assert_grep "[projects.\"$ws\"]" "$store" "codex-trust: the SDev workspace was not registered"
+  assert_grep 'trust_level = "trusted"' "$store" "codex-trust: the workspace was not recorded as trusted"
+  pass "fm-spawn pre-registers codex trust for a fresh SDev workspace"
+}
+
 test_sdev_workspace_repos_are_isolated_worktrees() {
   local parts case_dir home sdev fakebin id ws p
   parts=$(setup_case iso scdi multi-repo.yml)
@@ -356,6 +371,7 @@ test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger() {
 }
 
 test_sdev_backed_takes_sdev_path
+test_codex_spawn_pretrusts_the_sdev_workspace
 test_sdev_workspace_repos_are_isolated_worktrees
 test_sdev_isolation_failure_aborts
 test_claude_harness_is_refused_before_any_workspace_exists
