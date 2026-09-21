@@ -42,6 +42,7 @@ run_trust() {  # <codex-home> <workspace> [repo-rel ...]
 }
 
 store_body() {  # <store> <path> -> the non-blank body lines of that table, one per line
+  # shellcheck disable=SC2016 # node, not the shell, expands the ${...} template literals below.
   node -e '
     const fs = require("node:fs");
     const [store, target] = process.argv.slice(1);
