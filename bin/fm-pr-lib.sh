@@ -213,6 +213,15 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# decision_keys carries a sorted-unique, comma-joined list of privacy-safe
+# slugs (bin/fm-captain-hold.sh's validate_slug), or is empty when the origin
+# attested --none.
+fm_pr_decision_keys_valid() {
+  local keys=${1-}
+  local LC_ALL=C
+  [[ "$keys" =~ ^$|^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null
@@ -316,6 +325,18 @@ fm_pr_metadata_identity_parse() {
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        ;;
+      decisions_reviewed=*)
+        if [ "$seen_pr" -eq 1 ]; then
+          value=${line#decisions_reviewed=}
+          [ "$value" = 1 ] || post_pr_invalid=1
+        fi
+        ;;
+      decision_keys=*)
+        if [ "$seen_pr" -eq 1 ]; then
+          value=${line#decision_keys=}
+          fm_pr_decision_keys_valid "$value" || post_pr_invalid=1
+        fi
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

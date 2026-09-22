@@ -411,6 +411,109 @@ EOF
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
 
+test_metadata_identity_tolerates_captain_hold_attestation_keys() {
+  local dir meta
+
+  # Direct unit coverage of fm_pr_metadata_identity_parse: the attestation keys
+  # bin/fm-captain-hold.sh complete appends (decisions_reviewed=/decision_keys=)
+  # must parse in either order relative to pr_head=, and may repeat across
+  # review passes, without disturbing the identity fm_pr_url_parse derived from
+  # the single pr= line.
+  dir=$(fm_test_tmproot fm-pr-meta-decision-keys)
+
+  meta="$dir/after.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'decisions_reviewed=1' \
+    'decision_keys=task-a,task-b'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser rejected decision attestation keys appended after pr_head"
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/1 ] \
+    || fail "parser returned the wrong URL with trailing attestation keys"
+
+  meta="$dir/before-head.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'decisions_reviewed=1' \
+    'decision_keys=task-a' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser rejected decision attestation keys appearing before pr_head"
+
+  meta="$dir/repeated.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'decisions_reviewed=1' \
+    'decision_keys=task-a' \
+    'decisions_reviewed=1' \
+    'decision_keys=task-a,task-b'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser rejected a second review pass's repeated attestation keys"
+
+  meta="$dir/none.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'decisions_reviewed=1' \
+    'decision_keys='
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser rejected an empty decision_keys from a --none attestation"
+
+  meta="$dir/bad-reviewed.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'decisions_reviewed=2'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser accepted a malformed decisions_reviewed value"
+
+  meta="$dir/bad-keys.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'decision_keys=task a'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser accepted a decision_keys value with an embedded space"
+
+  meta="$dir/foreign.meta"
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'evil=1'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser accepted a genuinely foreign key after pr="
+
+  pass "metadata identity parse tolerates captain-hold attestation keys in either order and still rejects foreign keys"
+}
+
+test_poll_artifacts_survive_captain_hold_after_pr_check() {
+  local dir state
+
+  # End-to-end regression for the reported failure: a merged-poll registration
+  # made through fm-pr-check.sh must still validate after
+  # bin/fm-captain-hold.sh complete appends its attestation keys to the same
+  # task metadata, reproducing scdi-bom-canvas-publish and
+  # scdi-mr-rule3-screenshots (captain-hold completion running after
+  # fm-pr-check.sh silently broke merge detection).
+  dir=$(make_case captain-hold-after-pr-check)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "poll artifacts were invalid immediately after registration"
+
+  printf 'decisions_reviewed=1\ndecision_keys=task-a\n' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "captain-hold completion attestation appended after pr= broke poll validation"
+
+  pass "poll artifact validation survives captain-hold completion attestation appended after fm-pr-check.sh"
+}
+
 test_invalid_entrypoints_have_zero_side_effects() {
   local dir before after value rc
   dir=$(make_case invalid-entrypoints)
@@ -2418,6 +2521,8 @@ SH
 }
 
 test_parser_matrix
+test_metadata_identity_tolerates_captain_hold_attestation_keys
+test_poll_artifacts_survive_captain_hold_after_pr_check
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
