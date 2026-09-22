@@ -278,7 +278,11 @@ done
 
 MANUAL_CMD="cd $(shell_quote "$WORKSPACE_REAL") && codex"
 
-if ! OUT=$(node - "$STORE" "$WORKSPACE_REAL" "$MANUAL_CMD" <<'NODE'
+# Stock macOS Bash 3.2 mis-parses a here-document nested lexically inside a
+# command substitution's parentheses, so this heredoc is a plain statement in
+# its own function rather than directly inside `OUT=$(...)` below.
+record_trust() {
+  node - "$STORE" "$WORKSPACE_REAL" "$MANUAL_CMD" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -361,7 +365,9 @@ try {
   process.exit(1);
 }
 NODE
-); then
+}
+
+if ! OUT=$(record_trust); then
   echo "$OUT" >&2
   refuse "could not record trust for '$WORKSPACE_REAL' in '$STORE'"
 fi
