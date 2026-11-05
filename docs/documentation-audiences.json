@@ -106,6 +106,10 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/herdrcore-backend.md",
+      "target": "docs/verification/runtime-backends.md"
     }
   ],
   "surfaces": [
@@ -311,6 +315,10 @@
     },
     {
       "path": "docs/cmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/herdrcore-backend.md",
       "audience": "operator-current"
     },
     {

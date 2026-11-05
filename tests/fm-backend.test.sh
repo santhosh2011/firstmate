@@ -37,6 +37,10 @@ fm_git_identity fmtest fmtest@example.invalid
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
+# Shared Treehouse locks live under FM_HOME/state, independently of the
+# per-case FM_STATE_OVERRIDE. Never depend on a private home in the checkout.
+export FM_HOME="$TMP_ROOT/fleet-home"
+mkdir -p "$FM_HOME/state"
 # A claude spawn writes workspace trust into the launching user's own store,
 # and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
 # is pinned EMPTY beside the throwaway HOME: an inherited one would beat that

@@ -62,13 +62,15 @@
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
+#   herdr, zellij, orca, cmux, and herdrcore. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
+#   herdrcore uses hc plus herdr-app (docs/herdrcore-backend.md), with one
+#   space per crew worker or secondmate and explicit selection only.
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
@@ -1706,6 +1708,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
       exit 1
     }
+  fi
+  if [ "$BACKEND" = herdrcore ]; then
+    HERDRCORE_SPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdrcore_space_id)
+    HERDRCORE_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdrcore_tab_id)
+    HERDRCORE_TERMINAL_ID=$(fm_meta_get "$RELAUNCH_META" herdrcore_terminal_id)
   fi
   if [ "$BACKEND" = herdr ]; then
     HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
@@ -3424,6 +3431,13 @@ EOF
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
+  herdrcore)
+    HERDRCORE_TASK_IDS=$(fm_backend_herdrcore_create_task "$W" "$PROJ_ABS") || exit 1
+    read -r HERDRCORE_SPACE_ID HERDRCORE_TAB_ID HERDRCORE_TERMINAL_ID <<EOF
+$HERDRCORE_TASK_IDS
+EOF
+    T="$HERDRCORE_SPACE_ID:$HERDRCORE_TERMINAL_ID"
+    ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
     CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
@@ -3481,6 +3495,7 @@ spawn_send_text_line() { # <target> <text>
   zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+  herdrcore) fm_backend_herdrcore_send_text_line "$1" "$2" "$W" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -3489,6 +3504,7 @@ spawn_current_path() { # <target>
   herdr) fm_backend_herdr_current_path "$1" ;;
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  herdrcore) fm_backend_herdrcore_current_path "$1" "$W" ;;
   esac
 }
 spawn_send_literal() { # <target> <text>
@@ -3498,6 +3514,10 @@ spawn_send_literal() { # <target> <text>
   zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_literal "$1" "$2" ;;
   cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+  herdrcore)
+    echo "error: herdrcore supports submitted text only; use spawn_send_text_line" >&2
+    return 1
+    ;;
   esac
 }
 spawn_send_key() { # <target> <key>
@@ -3507,6 +3527,7 @@ spawn_send_key() { # <target> <key>
   zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+  herdrcore) fm_backend_herdrcore_send_key "$1" "$2" "$W" ;;
   esac
 }
 
@@ -4442,7 +4463,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id herdrcore_space_id herdrcore_tab_id herdrcore_terminal_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4481,6 +4502,11 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = orca ]; then
     echo "orca_worktree_id=$ORCA_WORKTREE_ID"
     echo "terminal=$ORCA_TERMINAL"
+  fi
+  if [ "$BACKEND" = herdrcore ]; then
+    echo "herdrcore_space_id=$HERDRCORE_SPACE_ID"
+    echo "herdrcore_tab_id=$HERDRCORE_TAB_ID"
+    echo "herdrcore_terminal_id=$HERDRCORE_TERMINAL_ID"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
@@ -4754,13 +4780,18 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+if [ "$BACKEND" = herdrcore ]; then
+  # hc send includes Enter; sending it again could answer a startup dialog.
+  spawn_send_text_line "$T" "$LAUNCH"
+else
+  spawn_send_literal "$T" "$LAUNCH"
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+[ "$BACKEND" = herdrcore ] || spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
