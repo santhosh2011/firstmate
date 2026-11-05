@@ -2007,3 +2007,35 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## herdrcore
+
+The experimental Herdr desktop adapter has offline verification only; [the backend guide](../herdrcore-backend.md) owns setup, limits, and the maintainer's live smoke procedure.
+On 2026-11-05 the adapter was developed without executing the installed `hc` or `herdr-app`, and without creating, moving, or closing any live space.
+The installed hc binary's embedded help identifies version 0.1.18, documents `send` as paste plus Enter, and exposes `foreground.cwd`, terminal labels, and `live`/`finished` state semantics.
+The app binary's embedded manual documents `space.new` results as `space`, `tab`, and `terminal`, and confirmed closure as `space.close --id <id> --confirmed true`.
+Reading embedded text is command-contract evidence only, not a live compatibility result.
+
+Refresh the stub guarantee with:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-herdrcore.test.sh
+```
+
+The strict PATH fixtures cover explicit selection, creation, bounded reads, foreground cwd, identity refusal, home separation, single-submit input, malformed or failed inventories, conservative agent state, guarded cleanup and retries, and crew and secondmate spawn plus inbox/pending-reply integration.
+They cannot establish the installed app's JSON compatibility, focus behavior, real harness/process behavior, core-recovery behavior, or desktop cleanup semantics.
+No real-backend CI lane or verified runtime auto-detection is claimed.
+
+The 2026-11-05 combined dispatcher and stub run on macOS used:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend.test.sh tests/fm-backend-herdrcore.test.sh
+```
+
+It returned:
+
+```text
+FM_TEST_END 2026-11-05T17:19:43Z tests/fm-backend.test.sh exit=0 duration_ms=33406 gate_skip=false
+FM_TEST_END 2026-11-05T17:19:53Z tests/fm-backend-herdrcore.test.sh exit=0 duration_ms=10062 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=43584
+```

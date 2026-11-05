@@ -32,6 +32,7 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/herdrcore-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -106,6 +107,10 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/herdrcore-backend.md",
+      "target": "docs/verification/runtime-backends.md"
     }
   ],
   "surfaces": [
@@ -311,6 +316,10 @@
     },
     {
       "path": "docs/cmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/herdrcore-backend.md",
       "audience": "operator-current"
     },
     {
