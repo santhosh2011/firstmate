@@ -1,0 +1,23 @@
+== fm-backend-hc.test.sh
+rc=0
+ok - hc: send_text_submit proves the turn through send --wait and never forces a blocked terminal
+ok - hc: send text is -- delimited, and FM_HC_BIN/FM_HC_SOCKET pin the call
+FM_TEST_COMPLETE
+== fm-backend-autodetect-smoke.test.sh
+rc=0
+skip: herdr not found
+== fm-backend-hc-smoke.test.sh
+rc=1
+< /Users/santhosh/.local/state/herdr-core/default/terminals.json 238584670 1793920649 20120
+---
+> /Users/santhosh/.local/state/herdr-core/default/terminals.json 238584725 1793920655 20120
+== fm-stack-sweep.test.sh
+rc=0
+ok - a compose project name shared by a reused slot resolves to its live occupant
+ok - a stack composed from a directory holding a live worktree is live
+ok - reading containment upward stops at this home's task-worktree roots
+== fm-test-run.test.sh
+rc=0
+ok - jobs scheduler runs proven scripts; failure propagates; non-proven refused
+ok - Herdr CI family-run step times out at 20 min under a 75 min job backstop
+ok - aggregate-json merges lane timing artifacts
