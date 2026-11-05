@@ -9,8 +9,8 @@
 # brief error and must NOT mention a no-go path.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-no-go-paths)
@@ -30,8 +30,8 @@ new_case() {
   # An ALLOWED project proceeds to the treehouse path, which keys its shared
   # project lock off the project's git identity before the brief check, so the
   # candidate project dirs are real repositories.
-  git init -q "$d/nogo/proj"
-  git init -q "$d/allowed"
+  fm_git_init_commit "$d/nogo/proj"
+  fm_git_init_commit "$d/allowed"
   (CDPATH='' cd -- "$d" && pwd -P)
 }
 
@@ -80,7 +80,7 @@ test_prefix_matching() {
     id="nogo-m$n-q7"
     d=$(new_case "match-$n")
     mkdir -p "$d/nogo/proj" "$d/nogo-sibling" "$d/home/blocked/deep/deeper"
-    git init -q "$d/nogo-sibling"
+    fm_git_init_commit "$d/nogo-sibling"
     # shellcheck disable=SC2059  # the table supplies the \n separators on purpose
     printf "${config//@D/$d}\n" > "$d/home/config/no-go-paths"
     out=$(run_spawn "$d" "$id" "${project//@D/$d}" codex)
@@ -297,17 +297,15 @@ ROWS
 make_worktree_fakebin() {  # <dir>
   local fakebin
   fakebin=$(fm_fakebin "$1")
+  fm_test_fake_tmux_spawn "$fakebin"
+  mv "$fakebin/tmux" "$fakebin/tmux-fixture"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-set -u
 [ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-esac
-exit 0
+if [ "${1:-}" = kill-window ] && [ "${FM_FAKE_TMUX_KILL_FAIL:-0}" = 1 ]; then
+  exit 1
+fi
+exec "$(dirname "$0")/tmux-fixture" "$@"
 SH
   chmod +x "$fakebin/tmux"
   cat > "$fakebin/treehouse" <<'SH'
@@ -647,6 +645,22 @@ test_unsearchable_config_dir_refuses() {
   pass "a config/ directory that cannot be searched refuses instead of reading as unrestricted"
 }
 
+test_refusal_retains_worktree_when_endpoint_close_fails() {
+  local id home proj wt fakebin out
+  id=nogo-close-fail-q7
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_worktree_case close-failed "$id")
+EOF
+  printf '%s\n' "$(dirname "$wt")" > "$home/config/no-go-paths"
+  out=$(FM_FAKE_TMUX_KILL_FAIL=1 run_worktree_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
+  assert_contains "$out" "$REFUSAL" "the fixture did not reach the no-go refusal"
+  assert_contains "$out" 'endpoint could not be closed' "the unsafe cleanup was not reported"
+  [ -d "$wt" ] || fail 'a worktree was removed while its endpoint could still write'
+  assert_absent "$wt/.fake-returned-to-pool" 'an open endpoint retained a returned pool slot'
+  pass "a no-go refusal retains the worktree when endpoint close fails"
+}
+
+test_refusal_retains_worktree_when_endpoint_close_fails
 test_prefix_matching
 test_unsearchable_config_dir_refuses
 test_worktree_inside_a_no_go_path_is_refused

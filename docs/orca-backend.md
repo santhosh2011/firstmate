@@ -26,6 +26,9 @@ Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
 
+`config/launch-env-allowlist` alone cannot scope worker credentials on Orca, because allowlisted values resolve from the Orca terminal's own environment.
+When scoped worker credentials live in a tmux session, configure the [Orca environment source](configuration.md#orca-environment-source-configlaunch-env-tmux-session).
+
 ## Task shape and metadata
 
 Each task has one Orca-managed git worktree and one Orca terminal.
@@ -36,12 +39,13 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<orca repo id>::<absolute worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
 
 ## Current lifecycle and safety
 
@@ -80,8 +84,10 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-spawn-orca-worktree.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
