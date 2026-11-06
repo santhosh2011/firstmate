@@ -43,6 +43,21 @@ fm_backend_validate_spawn herdrcore || fail 'spawn validation'
 [ "$(fm_backend_required_tools herdrcore)" = 'hc herdr-app jq treehouse' ] || fail 'required tools'
 pass 'herdrcore explicit selection and dependencies'
 
+new_world titles
+fm_backend_herdrcore_create_task fm-sm-planner "$FM_HOME" >/dev/null
+[ "$(jq -r '.spaces[0].name' "$FM_HC_TEST_WORLD/world.json")" = sm-planner ] || fail 'space title is not the plain task id'
+home_hash=$(printf '%s' "$(fm_backend_herdrcore_home)" | shasum -a 256 | cut -c1-12)
+[ "$(jq -r '.terminals[0].labels["fm.home-hash"]' "$FM_HC_TEST_WORLD/world.json")" = "$home_hash" ] || fail 'hidden home hash missing'
+[ "$(jq -r '.home_hash' "$FM_HOME/state/herdrcore-endpoints/s1.json")" = "$home_hash" ] || fail 'receipt home hash missing'
+pass 'plain task title retains hidden home hash'
+
+new_world partial-launch
+fm_backend_herdrcore_create_task fm-partial "$FM_HOME" >/dev/null
+mutate '.terminals[0].labels |= del(."fm.home", ."fm.task", ."fm.owner", ."fm.home-hash")'
+if fm_backend_herdrcore_create_task fm-partial "$FM_HOME" >/dev/null 2>&1; then fail 'unlabelled recorded space allowed duplicate'; fi
+[ "$(calls '[.[] | select(.[1:3]==["do","space.new"])] | length')" = 1 ] || fail 'partial launch retry created another space'
+pass 'receipt prevents duplicate launch before ownership labels are attached'
+
 # Every failure here must identify its failing boundary on stderr and stop
 # before creating a space, even when the external command itself is silent.
 for failure in inventory-command inventory-shape detail-command detail-shape detail-address inventory-duplicate spaces-command spaces-shape create-command create-shape; do
@@ -65,7 +80,7 @@ for failure in inventory-command inventory-shape detail-command detail-shape det
     spaces-command) mutate '.fail = ["herdr-app","ls"]'; reason='herdr-app ls' ;;
     spaces-shape) mutate '.spaces = null'; reason='herdr-app ls' ;;
     create-command|create-shape)
-      title="fm-refusal-$(printf '%s' "$FM_HOME" | shasum -a 256 | cut -c1-12)"
+      title=refusal
       cmd=$(jq -nc --arg title "$title" --arg home "$FM_HOME" \
         '["herdr-app","do","space.new","--name",$title,"--folder",$home,"--argv","[\"/bin/bash\",\"-l\"]"]')
       if [ "$failure" = create-command ]; then
@@ -121,6 +136,17 @@ mkdir -p "$FM_HC_TEST_WORLD/other-home/state"
 export FM_HOME="$FM_HC_TEST_WORLD/other-home"
 if fm_backend_target_exists herdrcore s1:t1 fm-shared; then fail 'foreign home adopted endpoint'; fi
 [ "$(fm_backend_herdrcore_create_task fm-shared "$FM_HOME")" = 's2 tab2 t2' ] || fail 'same task in second home collided'
+[ "$(jq -c '[.spaces[].name]' "$FM_HC_TEST_WORLD/world.json")" = '["shared","shared"]' ] || fail 'homes did not get identical plain titles'
+before=$(calls '[.[] | select(.[1]=="keys" or .[1]=="kill" or .[1]=="rm" or .[1:3]==["do","space.close"])] | length')
+if fm_backend_send_key herdrcore s1:t1 Enter fm-shared; then fail 'foreign same-titled endpoint accepted input'; fi
+if fm_backend_kill herdrcore s1:t1 '' fm-shared; then fail 'foreign same-titled endpoint closed'; fi
+# Even a copied receipt must fail the physical-home check.
+cp "$first_home/state/herdrcore-endpoints/s1.json" "$FM_HOME/state/herdrcore-endpoints/s1.json"
+if fm_backend_target_exists herdrcore s1:t1 fm-shared; then fail 'copied foreign receipt adopted endpoint'; fi
+if fm_backend_kill herdrcore s1:t1 '' fm-shared; then fail 'copied foreign receipt closed endpoint'; fi
+[ "$(calls '[.[] | select(.[1]=="keys" or .[1]=="kill" or .[1]=="rm" or .[1:3]==["do","space.close"])] | length')" = "$before" ] || fail 'foreign same-titled endpoint mutated'
+fm_backend_kill herdrcore s2:t2 '' fm-shared || fail 'same title prevented owned cleanup'
+[ "$(jq -c '[.spaces[].id]' "$FM_HC_TEST_WORLD/world.json")" = '["s1"]' ] || fail 'owned cleanup affected foreign same-titled space'
 export FM_HOME=$first_home
 [ "$(fm_backend_herdrcore_list_live)" = $'s1:t1\tfm-shared' ] || fail 'list mixed home namespaces'
 mutate '.terminals = null'
@@ -171,6 +197,23 @@ fm_backend_kill herdrcore s1:t1 '' fm-clean || fail 'cleanup retry failed'
 [ "$(jq '.spaces|length' "$FM_HC_TEST_WORLD/world.json")" = 0 ] || fail 'owned space remained'
 fm_backend_kill herdrcore s1:t1 '' fm-clean || fail 'cleanup not idempotent'
 pass 'cleanup refuses unrelated work and retains provenance across close failure'
+
+new_world legacy-title
+fm_backend_herdrcore_create_task fm-sm-planner "$FM_HOME" >/dev/null
+legacy_title="fm-sm-planner-$(printf '%s' "$(fm_backend_herdrcore_home)" | shasum -a 256 | cut -c1-12)"
+mutate ".spaces[0].name = \"$legacy_title\" | del(.terminals[0].labels[\"fm.home-hash\"])"
+receipt="$FM_HOME/state/herdrcore-endpoints/s1.json"
+jq --arg title "$legacy_title" '.title = $title | del(.home_hash)' "$receipt" > "$receipt.next"
+mv "$receipt.next" "$receipt"
+fm_backend_target_exists herdrcore s1:t1 fm-sm-planner || fail 'legacy endpoint not recognized'
+[ "$(fm_backend_herdrcore_list_live)" = $'s1:t1\tfm-sm-planner' ] || fail 'legacy endpoint missing from live list'
+if fm_backend_herdrcore_create_task fm-sm-planner "$FM_HOME" >/dev/null 2>&1; then fail 'legacy endpoint allowed duplicate launch'; fi
+fm_backend_kill herdrcore s1:t1 '' fm-sm-planner || fail 'legacy cleanup failed'
+fm_backend_kill herdrcore s1:t1 '' fm-sm-planner || fail 'legacy cleanup not idempotent'
+[ "$(jq '.spaces|length' "$FM_HC_TEST_WORLD/world.json")" = 0 ] || fail 'legacy space remained'
+[ "$(calls '[.[] | select(.[1:3]==["do","space.close"])] | length')" = 1 ] || fail 'legacy cleanup repeated closure'
+[ "$(jq -r '.title' "$receipt")" = "$legacy_title" ] || fail 'legacy receipt title rewritten'
+pass 'legacy long-title receipts remain recognized and cleanup is idempotent'
 
 new_world metadata
 meta="$FM_HOME/state/example.meta"

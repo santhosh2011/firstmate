@@ -34,7 +34,9 @@ if name == 'hc':
         if not matches:
             sys.exit(3)
         emit(matches[0])
-    elif args[0] == 'label' and len(args) == 5:
+    elif args[0] == 'label' and len(args) == 6:
+        assert [label.split('=', 1)[0] for label in args[2:]] == [
+            'fm.home', 'fm.task', 'fm.owner', 'fm.home-hash']
         terminal = next(t for t in world['terminals'] if t['address'] == args[1])
         for label in args[2:]:
             key, value = label.split('=', 1)

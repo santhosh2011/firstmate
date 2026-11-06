@@ -17,10 +17,12 @@ The adapter issues no core or desktop application startup, shutdown, update, or 
 ## Ownership and operation
 
 `bin/backends/herdrcore.sh` owns command arguments, creation receipts, label bindings, and cleanup mechanics.
-Space titles include the task label and a hash of the physical owning home path, separating primary and secondmate namespaces even when their task IDs match.
+Space titles show the plain task ID, such as `sm-planner`, without the `fm-` prefix or home hash.
+Different homes may display identical titles; ownership remains bound to the physical home, task label, and random nonce, with the home hash retained in hidden terminal labels and private receipts.
 A successful creation records the exact space, tab, and terminal and adds home, task, and random ownership labels to the terminal.
 Private receipts under the creating home's `state/herdrcore-endpoints/` bind those identities across spawn failure and cleanup retries.
 Cleanup retains receipts as tombstones so a later teardown retry remains idempotent.
+Existing spaces with long titles remain recognized and clean up using the title recorded in their original receipt.
 Preserve them with the home state; losing a receipt refuses endpoint operations rather than adopting a same-named space.
 A failed launch prints the command or validation that failed on stderr; failures after space creation identify retained receipts when available, so inspect the app and receipt before retrying.
 
