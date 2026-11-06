@@ -32,7 +32,11 @@ Cleanup refuses a renamed space, an extra tab, a moved terminal, or unrelated te
 It confirms space closure only for its exact recorded creation and preserves the receipt when a close fails.
 As with other terminal applications, a concurrent manual change between validation and a command remains a race; avoid rearranging a task space during cleanup.
 
-`hc send` pastes and submits in one call, so launch and typed steering do not append another Enter or retry the text.
+`hc send` pastes and submits in one call, so launch and typed steering never append another Enter or repeat submitted text.
+An explicit blocked refusal can reflect an agent's conversational question rather than an interactive dialog.
+After that refusal, the adapter reads the owned terminal again and retries once with force only when the shared composer classifier proves the input empty.
+Visible dialogs, pending drafts, unreadable captures, and ambiguous composer states refuse with a diagnostic; other send failures never trigger force.
+As with other rendered input guards, a manual change between the screen read and input remains a race.
 The native key interface provides Enter, Escape, Ctrl-C, and Ctrl-U; the additional `Interrupt` key uses `hc interrupt`, whose stop key depends on the running program.
 Routine text steering still uses the durable inbox; only the notification is typed, and secondmate reply tracking remains on the shared pending-reply path.
 Capture uses `hc read`, with the result trimmed locally to the requested number of lines.

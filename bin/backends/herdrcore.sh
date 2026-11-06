@@ -260,9 +260,29 @@ fm_backend_herdrcore_current_path() { # <target> [expected-label]
 }
 
 fm_backend_herdrcore_send_text_line() { # <target> <text> [expected-label]
+  local out state
   fm_backend_herdrcore_target_ready "$1" "${3:-}" || return 1
-  hc send "$FM_HC_TERMINAL" -- "$2" >/dev/null || {
-    fm_backend_herdrcore_error "hc send $FM_HC_TERMINAL failed"
+  if out=$(hc send "$FM_HC_TERMINAL" --json -- "$2" 2>&1); then
+    return 0
+  fi
+  # Only this structured refusal proves that hc typed nothing. An ambiguous
+  # failure may have submitted already, so never retry it or add an Enter.
+  if ! printf '%s' "$out" | jq -se 'length == 1 and .[0].error.kind == "blocked"' >/dev/null 2>&1; then
+    fm_backend_herdrcore_error "hc send $FM_HC_TERMINAL failed: $out"
+    return 1
+  fi
+  # Native blocked includes conversational questions. Re-read the owned pane
+  # after the refusal; only the shared classifier's positive empty proof may
+  # override it. Drafts, dialogs and unavailable/ambiguous captures all refuse.
+  state=$(fm_backend_herdrcore_composer_state "$1" "${3:-}")
+  if [ "$state" != empty ]; then
+    fm_backend_herdrcore_error "hc send $FM_HC_TERMINAL blocked; refusing force: composer=$state (pending text, dialog, or no empty-composer proof)"
+    return 1
+  fi
+  # Revalidate ownership immediately before input, including after the capture.
+  fm_backend_herdrcore_target_ready "$1" "${3:-}" || return 1
+  hc send "$FM_HC_TERMINAL" --json --force -- "$2" >/dev/null || {
+    fm_backend_herdrcore_error "hc send $FM_HC_TERMINAL --force failed; not retrying"
     return 1
   }
 }
@@ -296,7 +316,8 @@ rows=$FM_COMPOSER_CAPTURE_LINES" "$cap")
 }
 
 fm_backend_herdrcore_send_text_submit() { # <target> <text> <retries> <sleep> <settle> [expected-label]
-  # hc send owns paste + submit. Never retype or add a speculative second Enter.
+  # hc send owns paste + submit. Its blocked refusal typed nothing; the line
+  # helper alone may retry that refusal. Never retype or add a second Enter.
   fm_backend_herdrcore_send_text_line "$1" "$2" "${6:-}" || { printf send-failed; return 0; }
   sleep "$5"
   fm_backend_herdrcore_composer_state "$1" "${6:-}"

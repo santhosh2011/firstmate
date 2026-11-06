@@ -43,10 +43,37 @@ if name == 'hc':
             terminal['labels'][key] = value
         save()
     elif args[0] == 'read' and len(args) == 4 and args[2] == '--lines':
+        if world.get('send_attempts') == 1:
+            world['read_after_block'] = True
+            save()
         print(world.get('screen', 'one\ntwo\n❯'))
-    elif args[0] == 'send' and len(args) == 4 and args[2] == '--':
-        terminal = next(t for t in world['terminals'] if t['address'] == args[1])
-        if args[3] == 'treehouse get':
+    elif args[0] == 'send':
+        send_args = args[1:]
+        flags = send_args[:send_args.index('--')]
+        forced = '--force' in flags
+        flags = [v for v in flags if v not in ('--force', '--json')]
+        assert len(flags) == 1 and send_args[-2] == '--'
+        terminal = next(t for t in world['terminals'] if t['address'] == flags[0])
+        policy = world.get('send_policy')
+        if policy is not None:
+            attempts = world.get('send_attempts', 0) + 1
+            world['send_attempts'] = attempts
+            assert not world.get('delivered'), 'second submitted send is forbidden'
+            assert attempts == (2 if forced else 1), 'unexpected repeated send'
+            if forced:
+                assert policy['kind'] == 'blocked', 'force without blocked refusal'
+                assert world.get('read_after_block'), 'force without fresh capture'
+            kind = policy.get('force_kind', '') if forced else policy['kind']
+            save()
+            if kind:
+                print(json.dumps({'error': {'kind': kind, 'hint':
+                    'typing would answer its dialog; read its screen first, or --force'}}), file=sys.stderr)
+                sys.exit(9 if kind == 'blocked' else 1)
+            world['delivered'] = send_args[-1]
+            save()
+        else:
+            assert not forced, 'force requires an explicit fixture policy'
+        if send_args[-1] == 'treehouse get':
             terminal['foreground']['cwd'] = os.environ['FM_FAKE_PANE_PATH']
             save()
         emit({'started': True})
