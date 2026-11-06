@@ -43,6 +43,49 @@ fm_backend_validate_spawn herdrcore || fail 'spawn validation'
 [ "$(fm_backend_required_tools herdrcore)" = 'hc herdr-app jq treehouse' ] || fail 'required tools'
 pass 'herdrcore explicit selection and dependencies'
 
+# Every failure here must identify its failing boundary on stderr and stop
+# before creating a space, even when the external command itself is silent.
+for failure in inventory-command inventory-shape detail-command detail-shape detail-address inventory-duplicate spaces-command spaces-shape create-command create-shape; do
+  new_world "refusal-$failure"
+  case "$failure" in
+    inventory-command) mutate '.fail = ["hc","ls","--all","--json"]'; reason='hc ls' ;;
+    inventory-shape) mutate '.terminals = null'; reason='hc ls' ;;
+    detail-command)
+      mutate '.terminals = [{address:"t9",labels:{}}] | .fail = ["hc","get","t9","--json"]'
+      reason='hc get t9' ;;
+    detail-shape)
+      mutate '.terminals = [{address:"t9"}]'
+      reason='hc get t9' ;;
+    detail-address)
+      mutate '.terminals = [{address:"t9",labels:{}}] | .reply = {args:["hc","get","t9","--json"],value:{address:"t8",labels:{}}}'
+      reason='hc get t9' ;;
+    inventory-duplicate)
+      mutate '.terminals = [{address:"t9",labels:{}},{address:"t9",labels:{}}]'
+      reason='hc ls' ;;
+    spaces-command) mutate '.fail = ["herdr-app","ls"]'; reason='herdr-app ls' ;;
+    spaces-shape) mutate '.spaces = null'; reason='herdr-app ls' ;;
+    create-command|create-shape)
+      title="fm-refusal-$(printf '%s' "$FM_HOME" | shasum -a 256 | cut -c1-12)"
+      cmd=$(jq -nc --arg title "$title" --arg home "$FM_HOME" \
+        '["herdr-app","do","space.new","--name",$title,"--folder",$home,"--argv","[\"/bin/bash\",\"-l\"]"]')
+      if [ "$failure" = create-command ]; then
+        mutate ".fail = $cmd"
+      else
+        mutate ".reply = {args:$cmd,value:{}}"
+      fi
+      reason='space.new' ;;
+  esac
+  if fm_backend_herdrcore_create_task fm-refusal "$FM_HOME" > "$FM_HC_TEST_WORLD/out" 2> "$FM_HC_TEST_WORLD/err"; then
+    fail "$failure allowed creation"
+  fi
+  assert_grep "$reason" "$FM_HC_TEST_WORLD/err" "$failure was silent or unclear"
+  [ ! -s "$FM_HC_TEST_WORLD/out" ] || fail "$failure polluted endpoint output"
+  case "$failure" in create-*) ;; *)
+    [ "$(calls '[.[] | select(.[1:3] == ["do","space.new"])] | length')" = 0 ] || fail "$failure mutated app" ;;
+  esac
+done
+pass 'launch failures identify unavailable commands and invalid JSON on stderr'
+
 new_world endpoints
 ids=$(fm_backend_herdrcore_create_task fm-example "$FM_HOME")
 [ "$ids" = 's1 tab1 t1' ] || fail 'creation ids'
@@ -51,7 +94,14 @@ fm_backend_target_exists herdrcore s1:t1 fm-example || fail 'owned endpoint exis
 [ "$(fm_backend_capture herdrcore s1:t1 2 fm-example)" = $'two\n❯' ] || fail 'bounded capture'
 if fm_backend_herdrcore_create_task fm-example "$FM_HOME" >/dev/null 2>&1; then fail 'duplicate created'; fi
 [ "$(calls '[.[] | select(.[1:3] == ["do","space.new"])] | length')" = 1 ] || fail 'duplicate mutated app'
-pass 'create, duplicate refusal, capture and foreground path'
+# A renamed desktop space must not hide a duplicate carrying our task labels.
+mutate '.spaces[0].name = "renamed"'
+if fm_backend_herdrcore_create_task fm-example "$FM_HOME" > "$FM_HC_TEST_WORLD/out" 2> "$FM_HC_TEST_WORLD/err"; then
+  fail 'summary inventory hid duplicate ownership labels'
+fi
+assert_grep 'endpoint already exists' "$FM_HC_TEST_WORLD/err" 'duplicate had no reason'
+[ "$(calls '[.[] | select(.[1:3] == ["do","space.new"])] | length')" = 1 ] || fail 'renamed duplicate mutated app'
+pass 'create, duplicate refusal through detailed labels, capture and foreground path'
 
 before=$(calls 'length')
 if fm_backend_send_key herdrcore s1:t1 Enter fm-wrong; then fail 'wrong label accepted'; fi
@@ -135,6 +185,10 @@ pass 'durable metadata endpoint validation'
 # Exercise the actual spawn script: no real agent or terminal starts.
 for kind in crew secondmate; do
   new_world "spawn-$kind"
+  # A populated desktop exposes the summary/detail distinction hidden by an
+  # empty inventory. Both live and finished foreign terminals must be safe.
+  mutate '.terminals = [{address:"t8",state:"live",labels:{}},
+    {address:"t9",state:"finished",labels:{}}]'
   proj="$FM_HC_TEST_WORLD/project"
   wt="$FM_HC_TEST_WORLD/worktree"
   fm_git_worktree "$proj" "$wt" "hc-$kind"
@@ -151,12 +205,22 @@ for kind in crew secondmate; do
   else
     args+=(--mode no-mistakes --yolo off)
   fi
+  if [ "$kind" = secondmate ]; then
+    mutate '.fail = ["hc","get","t9","--json"]'
+    if out=$(fm_test_run_spawn "$FM_HOME" "$wt" "$fb" "${args[@]}"); then
+      fail 'secondmate spawn ignored detail failure'
+    fi
+    assert_contains "$out" 'hc get t9' 'secondmate spawn failed silently'
+    [ "$(calls '[.[] | select(.[1:3]==["do","space.new"])] | length')" = 0 ] || fail 'failed spawn created a space'
+    mutate 'del(.fail)'
+  fi
   out=$(fm_test_run_spawn "$FM_HOME" "$wt" "$fb" "${args[@]}") || fail "$kind spawn: $out"
   meta="$FM_HOME/state/worker.meta"
   [ "$(fm_backend_of_meta "$meta")" = herdrcore ] || fail 'spawn backend metadata'
   fm_backend_validate_task_endpoint "$meta" worker || fail 'spawn endpoint metadata'
   [ "$(calls '[.[] | select(.[1:3]==["do","space.new"])] | length')" = 1 ] || fail 'spawn did not own one space'
   [ "$(calls '[.[] | select(.[1]=="keys" and .[3]=="enter")] | length')" = 0 ] || fail 'spawn double submitted'
+  [ "$(calls '[.[] | select(.[0]=="hc" and (.[2]=="t8" or .[2]=="t9") and .[1]!="get")] | length')" = 0 ] || fail 'spawn changed a foreign terminal'
   # Spawn submits a short source command; the generated file owns the launch.
   [ "$(calls '[.[] | select(.[1]=="send" and (.[-1] | startswith(". ")))] | length')" = 1 ] || fail 'launch missing or repeated'
   staged=$(jq -sr '[.[] | select(.[1]=="send" and (.[-1] | startswith(". ")))][0][-1]' "$FM_HC_TEST_WORLD/calls.jsonl")

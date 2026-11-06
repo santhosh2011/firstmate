@@ -20,9 +20,15 @@ def emit(value):
 
 if world.get('fail') == [name, *args]:
     sys.exit(1)
+if world.get('reply', {}).get('args') == [name, *args]:
+    emit(world['reply']['value'])
+    sys.exit(0)
 if name == 'hc':
     if args == ['ls', '--all', '--json']:
-        emit({'terminals': world['terminals']})
+        # ls returns summaries; ownership labels are available through get only.
+        terminals = world['terminals']
+        emit({'terminals': [{k: v for k, v in t.items() if k != 'labels'}
+                            for t in terminals] if isinstance(terminals, list) else terminals})
     elif args[0] == 'get' and len(args) == 3 and args[2] == '--json':
         matches = [t for t in world['terminals'] if t['address'] == args[1]]
         if not matches:

@@ -22,6 +22,7 @@ A successful creation records the exact space, tab, and terminal and adds home, 
 Private receipts under the creating home's `state/herdrcore-endpoints/` bind those identities across spawn failure and cleanup retries.
 Cleanup retains receipts as tombstones so a later teardown retry remains idempotent.
 Preserve them with the home state; losing a receipt refuses endpoint operations rather than adopting a same-named space.
+A failed launch prints the command or validation that failed on stderr; failures after space creation identify retained receipts when available, so inspect the app and receipt before retrying.
 
 Reads, input, and cleanup require the receipt and matching terminal labels.
 The adapter never rebinds a stale terminal address by title or chooses the currently focused terminal.
@@ -49,7 +50,7 @@ It supplies both tools as strict PATH stubs and never contacts the live app.
 
 Before relying on the backend, a maintainer should use a disposable task and confirm:
 
-1. Installed `hc --help`, `herdr-app --help`, and `herdr-app commands` agree with the adapter's CLI contract, and `herdr-app ls` and `hc get` JSON agree with its strict parsers.
+1. Installed `hc --help`, `herdr-app --help`, and `herdr-app commands` agree with the adapter's CLI contract, and `herdr-app ls`, `hc ls --all --json`, and `hc get` JSON agree with its strict parsers.
 2. A crew launch creates one space, enters its isolated worktree, starts the selected interactive harness, and records matching space, tab, terminal, and receipt identities.
 3. A local secondmate launch creates another space in its home, and a steer arrives through its inbox with pending-reply delivery recorded.
 4. Capture, Enter, Escape, Ctrl-U, interrupt, and single-submit text delivery work for each intended harness without dismissing a startup dialog or repeating input.
