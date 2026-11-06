@@ -565,7 +565,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `rex` | Experimental; no dedicated real-backend CI lane | [`docs/rex-backend.md`](rex-backend.md) |
 | `t3code` | Experimental; no dedicated real-backend CI lane | [`docs/t3code-backend.md`](t3code-backend.md) |
 | `tern` | Experimental; no dedicated real-backend CI lane | [`docs/tern-backend.md`](tern-backend.md) |
-| `herdrcore` | Experimental; offline fixtures only | [`docs/herdrcore-backend.md`](herdrcore-backend.md) |
+| `herdrcore` | Experimental; offline fixtures plus read-only live inventory checks | [`docs/herdrcore-backend.md`](herdrcore-backend.md) |
 | `hc` | Experimental; the `tests-hc` lane runs the hc family against the pinned build | [`docs/hc-backend.md`](hc-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, paseo, rex, t3code, tern, hc, and herdrcore, since herdr, zellij, cmux, paseo, rex, t3code, tern, hc, and herdrcore are session providers only; Orca provides both the task worktree and terminal endpoint.
@@ -597,7 +597,7 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, 
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, `hc`, and `herdrcore` for ship and scout tasks; `backend=orca`, `backend=cmux`, `backend=paseo`, `backend=tern`, and `backend=hc` all still refuse `--secondmate` until secondmate launch semantics are designed for each, while `backend=t3code` supports secondmates and runs only the `claude` and `codex` harnesses.
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
-The experimental [`herdrcore` backend](herdrcore-backend.md) uses `hc` and `herdr-app` on PATH, supports local crew and secondmate spawns as separate desktop spaces, and has stub verification only.
+The experimental [`herdrcore` backend](herdrcore-backend.md) uses `hc` and `herdr-app` on PATH, supports local crew and secondmate spawns as separate desktop spaces, and has stub launch verification and read-only live inventory evidence only; live creation is unverified.
 
 ### Liveness classification
 
