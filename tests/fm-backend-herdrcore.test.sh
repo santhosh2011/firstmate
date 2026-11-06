@@ -167,7 +167,7 @@ fm_backend_send_key herdrcore s1:t1 Interrupt fm-input
 fm_backend_send_text_submit herdrcore s1:t1 "$payload" 3 0 0 fm-input >/dev/null
 [ "$(calls '[.[] | select(.[1] == "send")] | length')" = 2 ] || fail 'text retyped'
 [ "$(calls '[.[] | select(.[1] == "keys" and .[3] == "enter")] | length')" = 1 ] || fail 'send appended Enter'
-[ "$(jq -s --arg t "$payload" '[.[] | select(.[1]=="send") | .[3:] == ["--",$t]] | all' "$FM_HC_TEST_WORLD/calls.jsonl")" = true ] || fail 'payload changed'
+[ "$(jq -s --arg t "$payload" '[.[] | select(.[1]=="send") | .[-2:] == ["--",$t]] | all' "$FM_HC_TEST_WORLD/calls.jsonl")" = true ] || fail 'payload changed'
 pass 'literal payload, keys, interrupt and single-submit semantics'
 
 mutate '.terminals[0].status = {status:"working"}'
@@ -181,6 +181,67 @@ mutate '.fail = ["hc","ls","--all","--json"]'
 mutate 'del(.fail) | .terminals = []'
 [ "$(fm_backend_agent_state herdrcore s1:t1)" = missing ] || fail 'authoritative absence'
 pass 'recovery distinguishes absent, finished, ambiguous and unavailable'
+
+# Refused sends have not typed anything. The strict stub permits precisely one
+# forced attempt after that refusal and a fresh capture, never a second submit.
+for entry in line submit; do
+  new_world "blocked-empty-$entry"
+  fm_backend_herdrcore_create_task fm-bell "$FM_HOME" >/dev/null
+  mutate '.send_policy = {kind:"blocked"} | .screen = "Would you like a summary?\n❯"'
+  if [ "$entry" = line ]; then
+    fm_backend_herdrcore_send_text_line s1:t1 "$payload" fm-bell || fail 'blocked empty line refused'
+  else
+    verdict=$(fm_backend_send_text_submit herdrcore s1:t1 "$payload" 3 0 0 fm-bell)
+    [ "$verdict" = empty ] || fail "blocked empty submit: $verdict"
+  fi
+  [ "$(calls '[.[] | select(.[1]=="send")] | length')" = 2 ] || fail 'blocked send retry count'
+  [ "$(calls '[.[] | select(.[1]=="send" and index("--force"))] | length')" = 1 ] || fail 'force count'
+  [ "$(calls '[.[] | select(.[1]=="keys")] | length')" = 0 ] || fail 'speculative key after force'
+  [ "$(jq -r '.delivered' "$FM_HC_TEST_WORLD/world.json")" = "$payload" ] || fail 'forced payload changed'
+done
+pass 'blocked question with empty composer forces once and submits once'
+
+for scenario in trust permission numbered yes-no picker pending unknown capture-failed other-error forced-error ordinary; do
+  new_world "send-guard-$scenario"
+  fm_backend_herdrcore_create_task fm-bell "$FM_HOME" >/dev/null
+  mutate '.send_policy = {kind:"blocked"}'
+  case "$scenario" in
+    trust) screen=$'Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder\n  2. No, exit' ;;
+    permission) screen=$'Allow this command?\n› 1. Yes, proceed\n  2. No, cancel' ;;
+    numbered) screen=$'Choose an option\n❯ 1. Continue\n  2. Cancel' ;;
+    yes-no) screen=$'❯\nContinue? [y/N]' ;;
+    picker) screen=$'Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel' ;;
+    pending) screen=$'╭──────────────────╮\n│ ❯ pending draft  │\n╰──────────────────╯' ;;
+    unknown) screen='unidentified input surface' ;;
+    capture-failed) screen='❯'; mutate ".fail = [\"hc\",\"read\",\"t1\",\"--lines\",\"$FM_COMPOSER_CAPTURE_LINES\"]" ;;
+    other-error) screen='❯'; mutate '.send_policy.kind = "finished"' ;;
+    forced-error) screen='❯'; mutate '.send_policy.force_kind = "blocked"' ;;
+    ordinary) screen='❯'; mutate '.send_policy.kind = ""' ;;
+  esac
+  screen_json=$(jq -nc --arg screen "$screen" '$screen')
+  mutate ".screen = $screen_json"
+  # Use the adapter entry point to ensure its guard works even without the
+  # generic submit wrapper's earlier dialog check.
+  verdict=$(fm_backend_herdrcore_send_text_submit s1:t1 "$payload" 3 0 0 fm-bell 2> "$FM_HC_TEST_WORLD/err")
+  expected=send-failed
+  [ "$scenario" != ordinary ] || expected=empty
+  [ "$verdict" = "$expected" ] || fail "$scenario verdict=$verdict"
+  sends=1
+  [ "$scenario" != forced-error ] || sends=2
+  [ "$(calls '[.[] | select(.[1]=="send")] | length')" = "$sends" ] || fail "$scenario retried unexpectedly"
+  [ "$(calls '[.[] | select(.[1]=="keys")] | length')" = 0 ] || fail "$scenario sent a key"
+  if [ "$scenario" = ordinary ]; then
+    [ "$(jq -r '.delivered' "$FM_HC_TEST_WORLD/world.json")" = "$payload" ] || fail 'ordinary send lost payload'
+  else
+    assert_grep 'error: herdrcore hc send t1' "$FM_HC_TEST_WORLD/err" "$scenario lacks clear reason"
+    case "$scenario" in
+      other-error|forced-error) assert_grep 'failed' "$FM_HC_TEST_WORLD/err" "$scenario lacks failure reason" ;;
+      *) assert_grep 'refusing force: composer=' "$FM_HC_TEST_WORLD/err" "$scenario lacks composer reason" ;;
+    esac
+    [ "$(jq '.delivered == null' "$FM_HC_TEST_WORLD/world.json")" = true ] || fail "$scenario typed text"
+  fi
+done
+pass 'dialogs, drafts, unreadable captures and other errors refuse; forced failure never loops'
 
 new_world cleanup
 fm_backend_herdrcore_create_task fm-clean "$FM_HOME" >/dev/null
