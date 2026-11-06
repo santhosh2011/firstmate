@@ -45,7 +45,7 @@ test_sdev_ship_brief_lists_repos_and_branches() {
   assert_grep "- api (worktree: multi_api_src/, branch task/task-list)" "$brief" "sdev brief: lists api with its worktree dir and task branch"
   assert_grep "- ui (worktree: multi_ui_src/, branch task/task-list)" "$brief" "sdev brief: lists ui"
   assert_grep "- common (worktree: common/, branch task/task-list)" "$brief" "sdev brief: lists common"
-  assert_grep "done: ready for review across repos" "$brief" "sdev brief: combined definition of done"
+  assert_grep "done [at=<epoch>]: ready for review across repos" "$brief" "sdev brief: combined definition of done"
   assert_grep "Delivery contract: mode=no-mistakes" "$brief" "sdev brief: records the delivery contract line spawn checks"
   assert_grep "## Captain's intent" "$brief" "sdev brief: carries the two-subsection Task scaffold"
   assert_grep "## Firstmate spec" "$brief" "sdev brief: carries the Firstmate spec subsection"

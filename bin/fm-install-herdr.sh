@@ -21,7 +21,9 @@ FM_HERDR_CI_TAG="v${FM_HERDR_CI_VERSION}"
 FM_HERDR_CI_MIN_PROTOCOL=16
 # Bounded download ceiling (bytes). The largest official 0.7.4 asset is under 20 MiB.
 FM_HERDR_CI_MAX_BYTES=25000000
-FM_HERDR_CI_REPO=ogulcancelik/herdr
+# Upstream renamed ogulcancelik/herdr to herdrdev/herdr; the old release URLs
+# redirect to the same assets, and the pinned SHA-256 below proves the bytes.
+FM_HERDR_CI_REPO=herdrdev/herdr
 # A single reset mid-transfer from the release CDN used to fail the whole
 # required lane, because curl's own same-connection retries all fire inside the
 # same instant. Bounded attempts with a growing pause, like the ShellCheck pin.

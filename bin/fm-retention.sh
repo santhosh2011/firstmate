@@ -72,6 +72,8 @@ case "$MAX_WORKSPACES" in ''|*[!0-9]*|0) echo "fm-retention: invalid workspace b
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-landed-work-lib.sh
 . "$SCRIPT_DIR/fm-landed-work-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh

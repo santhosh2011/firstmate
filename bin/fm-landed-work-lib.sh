@@ -4,6 +4,7 @@
 # Callers provide the existing teardown context variables before invoking either
 # predicate: SCRIPT_DIR, META, ID, WT, PROJ, KIND, MODE, PR_URL, FORCE, and the
 # SDev variables SDEV_HOME_DIR, SDEV_PROJ, SDEV_WS, and SDEV_BRANCH.
+# Callers also source fm-pr-lib.sh for shared forge reads and branch lookup.
 #
 # validate_worktree_teardown_safety accepts a missing worktree as already gone,
 # but refuses dirty, uninspectable, or unlanded work exactly as teardown does.
@@ -34,27 +35,21 @@ default_branch() {
   return 1
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$(cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
 pr_number_from_target() {
   local target=$1 n
   case "$target" in
-    '') return 1 ;;
+    '' ) return 1 ;;
     *"/pull/"*)
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
       ;;
-    [0-9]*) n=${target%%[!0-9]*} ;;
+    *"/pulls/"*)  # Forgejo addresses pulls as /pulls/<n> and serves refs/pull/<n>/head.
+      n=${target##*/pulls/}
+      n=${n%%[!0-9]*}
+      ;;
+    [0-9]*)
+      n=${target%%[!0-9]*}
+      ;;
     *) return 1 ;;
   esac
   [ -n "$n" ] || return 1
@@ -73,8 +68,10 @@ ensure_commit_object() {
 
 patch_id_for_commit() {
   local commit=$1
+  # Indentation can change semantics. Unsupported --verbatim yields no id,
+  # so callers fall back to the content check or refuse, never ignore whitespace.
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
+    | git patch-id --verbatim 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
@@ -91,7 +88,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -104,29 +101,36 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name, and asks the
+# forge for both the PR state and head (Forgejo through tea, GitHub through gh).
+# Any missing proof or forge read error falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  remainder=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  head=${remainder%%$'\t'*}
-  resolved_url=${remainder#*$'\t'}
-  [ "$head" != "$remainder" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    head=$FM_PR_RECORD_HEAD
+    fm_pr_head_valid "$head" || return 1
+    resolved_url=$FM_PR_URL
+  else
+    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    state=${view%%$'\t'*}
+    remainder=${view#*$'\t'}
+    [ "$state" != "$view" ] || return 1
+    head=${remainder%%$'\t'*}
+    resolved_url=${remainder#*$'\t'}
+    [ "$head" != "$remainder" ] || return 1
+    case "$state" in
+      MERGED|merged) ;;
+      *) return 1 ;;
+    esac
+  fi
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
@@ -151,8 +155,9 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  local name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
+  CONTENT_LANDED_PROOF_ERROR=
+  [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     if [ "${FM_LANDED_WORK_NO_FETCH:-0}" != 1 ]; then
       git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -165,7 +170,15 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
+    merge_status=$?
+    case "$merge_status" in
+      1) ;; # Git completed the merge and found conflicts.
+      129) CONTENT_LANDED_PROOF_ERROR='git merge-tree --write-tree was rejected (Git 2.38 or newer required)' ;;
+      *) CONTENT_LANDED_PROOF_ERROR="git merge-tree --write-tree failed (Git exit $merge_status)" ;;
+    esac
+    return 1
+  }
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -295,7 +308,7 @@ canonical_existing_dir() {
   local target=$1
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
-  (cd "$target" && pwd -P)
+  ( cd "$target" && pwd -P )
 }
 
 retry_wait_secs_is_valid() {
@@ -344,45 +357,77 @@ cleanup_stale_lock_for_safety_check() {
   local dir=$1 lock
   lock=$(worktree_git_lock_path "$dir") || lock=""
   [ -n "$lock" ] && [ -e "$lock" ] || return 0
+
   echo "teardown: worktree safety check blocked by git lock $lock; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying (owning process may be exiting)" >&2
   sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
+
   if [ ! -e "$lock" ]; then
     echo "teardown: worktree safety check lock cleared on its own; retrying safety checks" >&2
     return 0
   fi
+
   if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
     rm -f "$lock"
     echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying worktree safety checks" >&2
     return 0
   fi
+
   echo "teardown: worktree safety check blocked by git lock $lock that is not provably stale (may belong to a live process); leaving it in place" >&2
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+}
+
+report_worktree_dirt() {
+  # Use the same porcelain snapshot and exemptions as the refusal predicate.
+  printf '%s\n' "$1" | awk '
+    /^\?\? / { if (++untracked <= 10) paths = paths "  " substr($0, 4) "\n"; next }
+    NF { tracked = 1 }
+    END {
+      if (tracked) print "uncommitted changes present (includes tracked edits)"
+      else print "uncommitted changes present (untracked-only leftovers)"
+      if (untracked) {
+        print "untracked paths (up to 10):"
+        printf "%s", paths
+        if (untracked > 10) print "  ... additional untracked paths omitted"
+      }
+    }
+  ' >&2
 }
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
-  case "$KIND" in secondmate|scout) return 0 ;; esac
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "uncommitted changes"; then return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"; fi
+  case "$KIND" in
+    secondmate|scout) return 0 ;;
+  esac
+
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
+    if worktree_safety_blocked_by_lock "uncommitted changes"; then
+      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    fi
     echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "commits not on a remote"; then return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"; fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
+    if worktree_safety_blocked_by_lock "commits not on a remote"; then
+      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    fi
     echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
-  # shellcheck disable=SC2153 # MODE is required caller context documented in this library header.
+
+  # shellcheck disable=SC2153 # MODE is required caller context documented above.
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"; fi
+      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+      fi
       echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -390,14 +435,14 @@ validate_worktree_teardown_safety() {
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
+    report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
@@ -407,7 +452,12 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
+        echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
+        echo "Restore or upgrade Git and retry the content check." >&2
+      else
+        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1

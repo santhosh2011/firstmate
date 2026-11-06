@@ -19,8 +19,8 @@
 # against real git state.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -85,31 +85,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/sdev"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
-  send-keys)
-    [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        [ "$prev" = "-l" ] && printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        prev=$a
-      done
-    fi
-    exit 0
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_fake_tmux_spawn "$fakebin"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'called %s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
@@ -184,7 +160,7 @@ test_sdev_backed_takes_sdev_path() {
   id=task-backed
   ws="$sdev/projects/scdi/$id"
   FM_FAKE_PANE_PATH="$ws" \
-  FM_FAKE_SEND_LOG="$case_dir/send.log" \
+  FM_FAKE_PANE_LOG="$case_dir/send.log" \
   FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err" \
     || { echo "spawn failed:"; cat "$case_dir/err"; fail "sdev-backed spawn should succeed"; }
@@ -195,6 +171,7 @@ test_sdev_backed_takes_sdev_path() {
   assert_eq "$(meta_val "$meta" slug)" "$id" "sdev-backed: slug recorded"
   assert_eq "$(meta_val "$meta" repos)" "api ui common" "sdev-backed: repos keys recorded in order"
   assert_eq "$(meta_val "$meta" worktree)" "$ws" "sdev-backed: worktree is the SDev workspace"
+  assert_eq "$(meta_val "$meta" branch)" "task/$id" "sdev-backed: metadata follows the per-repo branches"
   assert_eq "$(meta_val "$meta" mode)" "no-mistakes" "sdev-backed: the explicit delivery mode is recorded"
   assert_grep "$ws" "$case_dir/send.log" "sdev-backed: crewmate pane is cd'd into the workspace"
   assert_grep "$home/data/$id/launch-brief.md" "$case_dir/launch.log" "sdev-backed: crewmate launch command is sent"
@@ -259,7 +236,7 @@ test_claude_harness_is_refused_before_any_workspace_exists() {
   id=task-claude
   set +e
   FM_FAKE_SDEV_LOG="$case_dir/sdev.log" \
-  FM_FAKE_SEND_LOG="$case_dir/send.log" \
+  FM_FAKE_PANE_LOG="$case_dir/send.log" \
     run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi >/dev/null 2>"$case_dir/err"
   local code=$?
   set -e
@@ -289,7 +266,7 @@ test_non_sdev_project_uses_treehouse_unchanged() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="${TMUX:-fake,1,0}" \
-    FM_FAKE_PANE_PATH="$wt" FM_FAKE_SEND_LOG="$case_dir/send.log" \
+    FM_FAKE_PANE_PATH="$wt" FM_FAKE_PANE_LOG="$case_dir/send.log" \
     env -u SDEV_HOME "$SPAWN" "$id" "$case_dir/proj" --mode no-mistakes --yolo off >/dev/null 2>"$case_dir/err" \
     || { cat "$case_dir/err"; fail "control spawn should succeed"; }
 
@@ -370,6 +347,30 @@ test_sdev_ordinary_abort_leaves_the_workspace_offset_and_ledger() {
   pass "an ordinary abort leaves the SDev workspace, port offset, and ledger entry in place"
 }
 
+test_sdev_commit_hooks_cover_every_repo() {
+  local parts case_dir home sdev fakebin id ws repo message
+  parts=$(setup_case hooks scdi multi-repo.yml)
+  IFS='|' read -r case_dir home sdev fakebin <<<"$parts"
+  id=task-hooks
+  ws="$sdev/projects/scdi/$id"
+  FM_FAKE_PANE_PATH="$ws" run_spawn "$home" "$sdev" "$fakebin" "$id" projects/scdi \
+    >/dev/null 2>"$case_dir/err" || { cat "$case_dir/err"; fail "hook spawn should succeed"; }
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" env-file "$home/state/$id.git-hooks" "$case_dir/git-env"
+  for repo in multi_api_src multi_ui_src common; do
+    (
+      # Generated launch environment is the public hook-install interface.
+      # shellcheck source=/dev/null
+      . "$case_dir/git-env"
+      git -C "$ws/$repo" -c user.name=Test -c user.email=test@example.invalid \
+        commit --allow-empty -qm $'Hook integration\n\nCo-Authored-By: Claude <noreply@anthropic.com>'
+    ) || fail "commit failed in SDev member $repo"
+    message=$(git -C "$ws/$repo" log -1 --format=%B)
+    assert_not_contains "$message" 'Co-Authored-By:' "AI trailer survived in SDev member $repo"
+  done
+  pass "the SDev launch hook strips AI trailers in every member repository"
+}
+
+test_sdev_commit_hooks_cover_every_repo
 test_sdev_backed_takes_sdev_path
 test_codex_spawn_pretrusts_the_sdev_workspace
 test_sdev_workspace_repos_are_isolated_worktrees

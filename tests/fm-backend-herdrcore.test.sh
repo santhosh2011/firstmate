@@ -157,7 +157,23 @@ for kind in crew secondmate; do
   fm_backend_validate_task_endpoint "$meta" worker || fail 'spawn endpoint metadata'
   [ "$(calls '[.[] | select(.[1:3]==["do","space.new"])] | length')" = 1 ] || fail 'spawn did not own one space'
   [ "$(calls '[.[] | select(.[1]=="keys" and .[3]=="enter")] | length')" = 0 ] || fail 'spawn double submitted'
-  [ "$(calls '[.[] | select(.[1]=="send" and (.[-1] | contains("encode launch-brief")))] | length')" = 1 ] || fail 'launch missing or repeated'
+  # Spawn submits a short source command; the generated file owns the launch.
+  [ "$(calls '[.[] | select(.[1]=="send" and (.[-1] | startswith(". ")))] | length')" = 1 ] || fail 'launch missing or repeated'
+  staged=$(jq -sr '[.[] | select(.[1]=="send" and (.[-1] | startswith(". ")))][0][-1]' "$FM_HC_TEST_WORLD/calls.jsonl")
+  staged=${staged#". '"}
+  staged=${staged%"'"}
+  # Claude now receives a durable operational-inbox pointer rather than an
+  # inline prompt. Check the delivered record as well as its staged pointer.
+  launch_records=0
+  launch_home=$FM_HOME
+  [ "$kind" != secondmate ] || launch_home=$proj
+  for launch_record in "$launch_home/state/operational-inbox/"*.msg; do
+    [ -f "$launch_record" ] || continue
+    assert_grep "$launch_record" "$staged" 'staged launch does not point at its record'
+    assert_grep 'Offline spawn test.' "$launch_record" 'launch record lost the task'
+    launch_records=$((launch_records + 1))
+  done
+  [ "$launch_records" -eq 1 ] || fail 'launch record missing or duplicated'
   FM_HOME="$FM_HOME" FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" worker "offline steer payload" > "$FM_HC_TEST_WORLD/send.out" 2>&1 || fail "steer failed: $(cat "$FM_HC_TEST_WORLD/send.out")"
   [ -f "$FM_HOME/state/worker.inbox/001.msg" ] || fail 'durable steer missing'
   if [ "$kind" = secondmate ]; then
