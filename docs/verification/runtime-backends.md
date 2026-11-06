@@ -3749,7 +3749,7 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 
 ## herdrcore
 
-The experimental Herdr desktop adapter has offline verification only; [the backend guide](../herdrcore-backend.md) owns setup, limits, and the maintainer's live smoke procedure.
+The experimental Herdr desktop adapter has offline launch verification and read-only live inventory-shape evidence; [the backend guide](../herdrcore-backend.md) owns setup, limits, and the maintainer's live smoke procedure.
 On 2026-11-05 the adapter was developed without executing the installed `hc` or `herdr-app`, and without creating, moving, or closing any live space.
 The installed hc binary's embedded help identifies version 0.1.18, documents `send` as paste plus Enter, and exposes `foreground.cwd`, terminal labels, and `live`/`finished` state semantics.
 The app binary's embedded manual documents `space.new` results as `space`, `tab`, and `terminal`, and confirmed closure as `space.close --id <id> --confirmed true`.
@@ -3762,10 +3762,10 @@ bin/fm-test-run.sh tests/fm-backend-herdrcore.test.sh
 ```
 
 The strict PATH fixtures cover explicit selection, creation, bounded reads, foreground cwd, identity refusal, home separation, single-submit input, malformed or failed inventories, conservative agent state, guarded cleanup and retries, and crew and secondmate spawn plus inbox/pending-reply integration.
-They cannot establish the installed app's JSON compatibility, focus behavior, real harness/process behavior, core-recovery behavior, or desktop cleanup semantics.
+They cannot establish complete installed app JSON compatibility, focus behavior, real harness/process behavior, core-recovery behavior, or desktop cleanup semantics.
 No real-backend CI lane or verified runtime auto-detection is claimed.
 
-The 2026-11-05 combined dispatcher and stub run on macOS used:
+The 2026-11-06 combined dispatcher and stub run on macOS used:
 
 ```sh
 bin/fm-test-run.sh tests/fm-backend.test.sh tests/fm-backend-herdrcore.test.sh
@@ -3774,7 +3774,43 @@ bin/fm-test-run.sh tests/fm-backend.test.sh tests/fm-backend-herdrcore.test.sh
 It returned:
 
 ```text
-FM_TEST_END 2026-11-05T17:19:43Z tests/fm-backend.test.sh exit=0 duration_ms=33406 gate_skip=false
-FM_TEST_END 2026-11-05T17:19:53Z tests/fm-backend-herdrcore.test.sh exit=0 duration_ms=10062 gate_skip=false
-FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=43584
+FM_TEST_END 2026-11-06T04:48:44Z tests/fm-backend.test.sh exit=0 duration_ms=45030 gate_skip=false
+FM_TEST_END 2026-11-06T04:49:00Z tests/fm-backend-herdrcore.test.sh exit=0 duration_ms=16626 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=61775
 ```
+
+On 2026-11-06, read-only inventory checks on macOS with `hc 0.1.18` and `herdr-app 0.1.13` confirmed that the terminal listing contains summary addresses without labels, while the app listing has the expected space fields.
+No real space or terminal was created or changed.
+The commands and their projected output were:
+
+```sh
+hc --version
+herdr-app --version
+hc ls --all --json | jq '[.terminals[] | {address: (.address | type), labels: has("labels")}] | unique'
+herdr-app ls | jq '{spaces: (.spaces | type), entries: ([.spaces[] | {id: (.id | type), name: (.name | type), tabs: (.tabs | type)}] | unique)}'
+```
+
+```text
+hc 0.1.18
+herdr-app 0.1.13
+[
+  {
+    "address": "string",
+    "labels": false
+  }
+]
+{
+  "spaces": "array",
+  "entries": [
+    {
+      "id": "string",
+      "name": "string",
+      "tabs": "array"
+    }
+  ]
+}
+```
+
+The offline regression now emits summary-only terminal listings and covers populated-desktop crew and secondmate launches, duplicate labels hidden by a renamed space, unavailable or contradictory terminal details, and stderr diagnostics for launch refusals.
+A detail-read failure remains a refusal rather than being treated as an unlabeled or absent terminal.
+Live creation and harness startup still require the backend guide's smoke test.
