@@ -1,0 +1,38 @@
+FM_TEST_BEGIN 2026-11-06T13:41:38Z tests/fm-backend-herdrcore.test.sh family=backend-dispatch expected_gate_skip=none
+ok - herdrcore explicit selection and dependencies
+ok - plain task title retains hidden home hash
+ok - receipt prevents duplicate launch before ownership labels are attached
+ok - launch failures identify unavailable commands and invalid JSON on stderr
+ok - create, duplicate refusal through detailed labels, capture and foreground path
+error: herdrcore invalid or mismatched ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/endpoints/home/state/herdrcore-endpoints/s1.json
+error: herdrcore missing or unsafe ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/endpoints/home/state/herdrcore-endpoints/s2.json
+error: herdrcore invalid terminal in target 's1:other'
+error: herdrcore terminal ownership does not match receipt for s1:t1
+error: herdrcore space s1 was renamed or its tabs changed; refusing close
+ok - labels, addresses and creation nonce fail closed
+error: herdrcore missing or unsafe ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/homes/other-home/state/herdrcore-endpoints/s1.json
+error: herdrcore missing or unsafe ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/homes/other-home/state/herdrcore-endpoints/s1.json
+error: herdrcore missing or unsafe ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/homes/other-home/state/herdrcore-endpoints/s1.json
+error: herdrcore invalid or mismatched ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/homes/other-home/state/herdrcore-endpoints/s1.json
+error: herdrcore invalid or mismatched ownership receipt /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/homes/other-home/state/herdrcore-endpoints/s1.json
+error: herdrcore invalid hc ls --all --json response; expected unique terminal addresses
+ok - home isolation, scoped listing and malformed-inventory refusal
+ok - literal payload, keys, interrupt and single-submit semantics
+error: herdrcore hc ls --all --json failed; cannot read terminal inventory
+ok - recovery distinguishes absent, finished, ambiguous and unavailable
+ok - blocked question with empty composer forces once and submits once
+ok - dialogs, drafts, unreadable captures and other errors refuse; forced failure never loops
+error: herdrcore space s1 was renamed or its tabs changed; refusing close
+error: herdrcore space s1 contains another terminal; refusing close
+error: herdrcore herdr-app do space.close failed for s1; retained /private/var/folders/hl/kg_8d3l534q58cc9f1wf0lj80000gn/T/fm-herdrcore.bskb3n/cleanup/home/state/herdrcore-endpoints/s1.json
+ok - cleanup refuses unrelated work and retains provenance across close failure
+ok - legacy long-title receipts remain recognized and cleanup is idempotent
+ok - durable metadata endpoint validation
+error: herdrcore hc get t1 --json failed; cannot verify terminal inventory
+ok - crew spawn and steer retain inbox and pending-reply behavior
+error: herdrcore hc get t1 --json failed; cannot verify terminal inventory
+ok - secondmate spawn and steer retain inbox and pending-reply behavior
+FM_TEST_END 2026-11-06T13:42:22Z tests/fm-backend-herdrcore.test.sh exit=0 duration_ms=43603 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=43879
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=1 duration_ms=43603 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-backend-herdrcore.test.sh duration_ms=43603
