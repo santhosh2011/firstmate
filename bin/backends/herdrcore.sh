@@ -2,7 +2,7 @@
 # herdrcore.sh - experimental Herdr desktop spaces backed by hc terminals.
 # Only explicit selection is supported; no core/app lifecycle command is issued.
 # CLI contract: hc {ls --all,get,read,send,keys,interrupt,kill,rm,label};
-# herdr-app ls; herdr-app 'do' space.new --name LABEL --folder CWD --argv JSON;
+# herdr-app ls; herdr-app 'do' space.new --name TASK_ID --folder CWD --argv JSON;
 # herdr-app 'do' space.close --id SPACE --confirmed true.
 # create_task prints space, tab and terminal IDs separated by spaces.
 # Targets are SPACE:TERMINAL; refusals explain the failed guard on stderr.
@@ -10,6 +10,8 @@
 # A private creation receipt under state/herdrcore-endpoints plus nonce labels
 # binds every operation to the creating home. IDs alone never authorize input
 # or closing a space. Receipt retention makes partial cleanup retryable.
+# Titles drop the fm- prefix; home hashes stay in fm.home-hash and home_hash
+# receipt metadata. Full home paths, task labels and nonces remain authoritative.
 # API/GUI behavior still needs the live verification in docs/herdrcore-backend.md.
 
 # shellcheck source=bin/fm-composer-lib.sh
@@ -149,20 +151,32 @@ fm_backend_herdrcore_target_ready() { # <target> [expected-label]
 }
 
 fm_backend_herdrcore_create_task() { # <fm-label> <cwd>
-  local label=$1 cwd=$2 home inv spaces title nonce out space tab terminal dir receipt
+  local label=$1 cwd=$2 home home_hash inv spaces title nonce out space tab terminal dir receipt file
   case "$label" in fm-*) ;; *) fm_backend_herdrcore_error "invalid task label '$label'; expected fm- prefix"; return 1 ;; esac
   case "$label" in *[!A-Za-z0-9._-]*) fm_backend_herdrcore_error "invalid task label '$label'"; return 1 ;; esac
   fm_backend_herdrcore_tool_check || return 1
   home=$(fm_backend_herdrcore_home) || return 1
-  title="$label-$(printf '%s' "$home" | shasum -a 256 | cut -c1-12)"
+  title=${label#fm-}
+  home_hash=$(printf '%s' "$home" | shasum -a 256 | cut -c1-12)
   inv=$(fm_backend_herdrcore_inventory) || return 1
   spaces=$(fm_backend_herdrcore_spaces) || return 1
   if printf '%s' "$inv" | jq -e --arg h "$home" --arg l "$label" \
-    'any(.[]; .labels["fm.home"] == $h and .labels["fm.task"] == $l)' >/dev/null \
-    || printf '%s' "$spaces" | jq -e --arg n "$title" 'any(.[]; .name == $n)' >/dev/null; then
+    'any(.[]; .labels["fm.home"] == $h and .labels["fm.task"] == $l)' >/dev/null; then
     echo "error: herdrcore endpoint already exists for $label; refusing duplicate launch" >&2
     return 1
   fi
+  # Receipts also catch partial launches whose labels were never attached.
+  # A foreign space with the same display title is not ours to adopt or block.
+  dir=$(fm_backend_herdrcore_receipt_dir)
+  for file in "$dir"/*.json; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    if jq -e --arg h "$home" --arg l "$label" --argjson spaces "$spaces" '
+      select(.home == $h and .label == $l) | .space as $s
+      | any($spaces[]; .id == $s)' "$file" >/dev/null; then
+      fm_backend_herdrcore_error "endpoint already exists for $label; refusing duplicate launch"
+      return 1
+    fi
+  done
   # Bash is explicit: fm-spawn sends POSIX shell commands even when the app's
   # configured default shell is fish, nu, or another non-POSIX shell.
   out=$(herdr-app 'do' space.new --name "$title" --folder "$cwd" --argv '["/bin/bash","-l"]') || {
@@ -183,7 +197,6 @@ fm_backend_herdrcore_create_task() { # <fm-label> <cwd>
   }
   fm_backend_herdrcore_parse_target "$space:$terminal" || return 1
   case "$tab" in ''|*[!A-Za-z0-9_-]*) fm_backend_herdrcore_error "invalid tab in space.new response; inspect $space before retrying"; return 1 ;; esac
-  dir=$(fm_backend_herdrcore_receipt_dir)
   mkdir -p "$dir" || {
     fm_backend_herdrcore_error "cannot create receipt directory $dir for $space:$terminal"
     return 1
@@ -197,8 +210,8 @@ fm_backend_herdrcore_create_task() { # <fm-label> <cwd>
     return 1
   }
   receipt=$(jq -n --arg s "$space" --arg t "$terminal" --arg tab "$tab" --arg h "$home" \
-    --arg l "$label" --arg n "$nonce" --arg title "$title" \
-    '{version:1,space:$s,terminal:$t,tab:$tab,home:$h,label:$l,nonce:$n,title:$title}') || {
+    --arg l "$label" --arg n "$nonce" --arg title "$title" --arg hash "$home_hash" \
+    '{version:1,space:$s,terminal:$t,tab:$tab,home:$h,home_hash:$hash,label:$l,nonce:$n,title:$title}') || {
       fm_backend_herdrcore_error "cannot encode ownership receipt for $space:$terminal"
       return 1
     }
@@ -218,7 +231,7 @@ fm_backend_herdrcore_create_task() { # <fm-label> <cwd>
       fm_backend_herdrcore_error "space.new terminal does not match created live space/tab; retained $dir/$space.json for inspection"
       return 1
     }
-  if ! hc label "$terminal" "fm.home=$home" "fm.task=$label" "fm.owner=$nonce" >/dev/null \
+  if ! hc label "$terminal" "fm.home=$home" "fm.task=$label" "fm.owner=$nonce" "fm.home-hash=$home_hash" >/dev/null \
     || ! fm_backend_herdrcore_target_ready "$space:$terminal" "$label"; then
     echo "error: herdrcore created $space:$terminal but could not verify ownership; retained $dir/$space.json for inspection" >&2
     return 1

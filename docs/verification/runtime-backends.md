@@ -3762,6 +3762,14 @@ bin/fm-test-run.sh tests/fm-backend-herdrcore.test.sh
 ```
 
 The strict PATH fixtures cover explicit selection, creation, bounded reads, foreground cwd, identity refusal, home separation, single-submit input, malformed or failed inventories, conservative agent state, guarded cleanup and retries, and crew and secondmate spawn plus inbox/pending-reply integration.
+The 2026-11-06 macOS run of the stub command above also verified plain task titles, hidden home hashes, same-titled spaces across homes with foreign ownership refusal, duplicate refusal for partially labelled launches, and recognition plus idempotent cleanup of legacy long-title receipts.
+It used the strict offline fixture protocol rather than an installed app version and returned:
+
+```text
+FM_TEST_END 2026-11-06T05:09:45Z tests/fm-backend-herdrcore.test.sh exit=0 duration_ms=19817 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=19916
+```
+
 They cannot establish complete installed app JSON compatibility, focus behavior, real harness/process behavior, core-recovery behavior, or desktop cleanup semantics.
 No real-backend CI lane or verified runtime auto-detection is claimed.
 
